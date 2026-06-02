@@ -11,3 +11,8 @@ Thumbs.db
 .DS_Store
 .vscode/
 .idea/
+
+# Variables de entorno
+.env
+.env.local
+.env.*.local
