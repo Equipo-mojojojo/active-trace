@@ -6,8 +6,11 @@ from fastapi import FastAPI
 
 from app.api.v1.routers.audit import router as audit_router
 from app.api.v1.routers.auth import router as auth_router
+from app.api.v1.routers.carreras import router as carreras_router
+from app.api.v1.routers.cohortes import router as cohortes_router
 from app.api.v1.routers.health import router as health_router
 from app.api.v1.routers.impersonacion import router as impersonacion_router
+from app.api.v1.routers.materias import router as materias_router
 from app.api.v1.routers.roles import router as roles_router
 from app.core.audit_middleware import AuditMiddleware
 from app.core.config import get_settings
@@ -42,8 +45,11 @@ def create_app() -> FastAPI:
     application.add_middleware(AuditMiddleware)
     application.include_router(audit_router)
     application.include_router(auth_router)
+    application.include_router(carreras_router)
+    application.include_router(cohortes_router)
     application.include_router(health_router)
     application.include_router(impersonacion_router)
+    application.include_router(materias_router)
     application.include_router(roles_router)
     return application
 

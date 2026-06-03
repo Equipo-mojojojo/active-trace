@@ -4,6 +4,10 @@ from app.models.audit_log import AuditLog
 from app.models.auth_login_attempt import AuthLoginAttempt
 from app.models.auth_session import AuthSession
 from app.models.base import BaseModelMixin, TenantScopedModelMixin
+from app.models.carrera import Carrera
+from app.models.cohorte import Cohorte
+from app.models.enums import EstadoActivo
+from app.models.materia import Materia
 from app.models.password_reset_token import PasswordResetToken
 from app.models.permission import Permission
 from app.models.refresh_token import RefreshToken
@@ -17,6 +21,10 @@ __all__ = [
     "AuthLoginAttempt",
     "AuthSession",
     "BaseModelMixin",
+    "Carrera",
+    "Cohorte",
+    "EstadoActivo",
+    "Materia",
     "PasswordResetToken",
     "Permission",
     "RefreshToken",
