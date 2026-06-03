@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.v1.routers.asignaciones import router as asignaciones_router
 from app.api.v1.routers.audit import router as audit_router
 from app.api.v1.routers.auth import router as auth_router
 from app.api.v1.routers.carreras import router as carreras_router
@@ -12,6 +13,7 @@ from app.api.v1.routers.health import router as health_router
 from app.api.v1.routers.impersonacion import router as impersonacion_router
 from app.api.v1.routers.materias import router as materias_router
 from app.api.v1.routers.roles import router as roles_router
+from app.api.v1.routers.usuarios import router as usuarios_router
 from app.core.audit_middleware import AuditMiddleware
 from app.core.config import get_settings
 from app.core.database import dispose_engine, initialize_database
@@ -43,6 +45,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     application.add_middleware(AuditMiddleware)
+    application.include_router(asignaciones_router)
     application.include_router(audit_router)
     application.include_router(auth_router)
     application.include_router(carreras_router)
@@ -51,6 +54,7 @@ def create_app() -> FastAPI:
     application.include_router(impersonacion_router)
     application.include_router(materias_router)
     application.include_router(roles_router)
+    application.include_router(usuarios_router)
     return application
 
 

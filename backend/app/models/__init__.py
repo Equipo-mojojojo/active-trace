@@ -1,5 +1,6 @@
 """ORM models package."""
 
+from app.models.asignacion import Asignacion
 from app.models.audit_log import AuditLog
 from app.models.auth_login_attempt import AuthLoginAttempt
 from app.models.auth_session import AuthSession
@@ -15,8 +16,10 @@ from app.models.role import Role
 from app.models.role_permission import RolePermission
 from app.models.tenant import Tenant
 from app.models.user import User
+from app.models.usuario import Usuario
 
 __all__ = [
+    "Asignacion",
     "AuditLog",
     "AuthLoginAttempt",
     "AuthSession",
@@ -33,4 +36,5 @@ __all__ = [
     "Tenant",
     "TenantScopedModelMixin",
     "User",
+    "Usuario",
 ]

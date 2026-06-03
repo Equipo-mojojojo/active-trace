@@ -104,20 +104,39 @@ class RoleRepository:
     async def get_effective_permission_codes(self, user_id: UUID, tenant_id: UUID) -> set[str]:
         """Return the set of permission codes for all roles of a user.
 
-        This queries the RolePermission join table using the user's
-        roles from User.roles (JSON) — which is the source of truth
-        until C-07 formalizes the assignment model.
+        With C-07: queries vigent Asignacion rows for the user.
+        Falls back to User.roles (JSON) for backwards compatibility (C-06).
         """
         from app.models.user import User
+        from app.models.asignacion import Asignacion
+        from datetime import date
 
-        user_result = await self.session.execute(
-            select(User.roles).where(
-                User.id == user_id,
-                User.tenant_id == tenant_id,
-                User.deleted_at.is_(None),
+        # Try C-07 approach: query vigent asignaciones
+        today = date.today()
+        asignacion_result = await self.session.execute(
+            select(Asignacion.rol)
+            .where(
+                Asignacion.usuario_id == user_id,
+                Asignacion.tenant_id == tenant_id,
+                Asignacion.deleted_at.is_(None),
+                Asignacion.desde <= today,
+                (Asignacion.hasta.is_(None)) | (today < Asignacion.hasta),
             )
         )
-        user_roles = user_result.scalar_one_or_none()
+        vigent_roles = list(asignacion_result.scalars().all())
+
+        # If C-07 asignaciones exist, use them; otherwise fall back to User.roles (C-06)
+        if vigent_roles:
+            user_roles = vigent_roles
+        else:
+            user_result = await self.session.execute(
+                select(User.roles).where(
+                    User.id == user_id,
+                    User.tenant_id == tenant_id,
+                    User.deleted_at.is_(None),
+                )
+            )
+            user_roles = user_result.scalar_one_or_none() or []
 
         if not user_roles:
             return set()
