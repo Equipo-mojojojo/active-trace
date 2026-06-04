@@ -12,7 +12,25 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Engram (datos locales del agente, no del proyecto)
+.engram/
+
+# Entornos virtuales
+.venv/
+venv/
+
+# Node (por si aparece frontend)
+node_modules/
+
 # Variables de entorno
 .env
 .env.local
 .env.*.local
+
+# OpenSpec: archives de changes completados (los specs ya están sincronizados en openspec/specs/)
+openspec/changes/archive/
