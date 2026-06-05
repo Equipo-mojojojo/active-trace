@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from datetime import date
 from pathlib import Path
 from uuid import UUID
 
@@ -193,3 +194,223 @@ async def create_test_user(
     await db_session.commit()
     await db_session.refresh(user)
     return user
+
+
+async def create_test_materia(
+    db_session,
+    *,
+    tenant_id: UUID,
+    codigo: str = "MAT-TEST",
+    nombre: str | None = None,
+):
+    from app.models.materia import Materia
+
+    materia = Materia(
+        tenant_id=tenant_id,
+        codigo=codigo,
+        nombre=nombre or f"Materia {codigo}",
+    )
+    db_session.add(materia)
+    await db_session.flush()
+    await db_session.refresh(materia)
+    return materia
+
+
+async def create_test_cohorte(
+    db_session,
+    *,
+    tenant_id: UUID,
+    nombre: str = "COH-TEST",
+):
+    from app.models.carrera import Carrera
+    from app.models.cohorte import Cohorte
+
+    carrera = Carrera(
+        tenant_id=tenant_id,
+        codigo=f"CAR-{nombre[:8]}",
+        nombre=f"Carrera {nombre}",
+    )
+    db_session.add(carrera)
+    await db_session.flush()
+    await db_session.refresh(carrera)
+
+    cohorte = Cohorte(
+        tenant_id=tenant_id,
+        carrera_id=carrera.id,
+        nombre=nombre,
+        anio=2025,
+        vig_desde=date(2025, 1, 1),
+        vig_hasta=None,
+    )
+    db_session.add(cohorte)
+    await db_session.flush()
+    await db_session.refresh(cohorte)
+    return cohorte
+
+
+async def create_test_padron_entry(
+    db_session,
+    *,
+    tenant_id: UUID,
+    materia_id: UUID,
+    cohorte_id: UUID,
+    nombre: str = "Ana",
+    apellidos: str = "Lopez",
+    email: str = "ana@test.com",
+    comision: str = "A1",
+):
+    from app.repositories.padron_repository import PadronRepository
+
+    repo = PadronRepository(db_session, tenant_id)
+    version = await repo.crear_version(materia_id, cohorte_id)
+    await repo.crear_entradas_bulk(
+        version.id,
+        [
+            {
+                "nombre": nombre,
+                "apellidos": apellidos,
+                "email": email,
+                "comision": comision,
+                "regional": "Centro",
+            }
+        ],
+    )
+    entradas = await repo.listar_entradas(version.id)
+    await db_session.flush()
+    return entradas[0]
+
+
+async def create_test_usuario_docente(
+    db_session,
+    *,
+    tenant_id: UUID,
+    nombre: str = "Doc",
+    apellidos: str = "Tester",
+    email: str = "doc@test.com",
+):
+    from app.models.usuario import Usuario
+
+    usuario = Usuario(
+        tenant_id=tenant_id,
+        nombre=nombre,
+        apellidos=apellidos,
+        email=email,
+    )
+    db_session.add(usuario)
+    await db_session.flush()
+    await db_session.refresh(usuario)
+    return usuario
+
+
+@pytest_asyncio.fixture
+async def test_tenant(db_session):
+    tenant = await create_test_tenant(
+        db_session, slug="c10c11-tenant", name="C10C11 Tenant"
+    )
+    await db_session.commit()
+    return tenant
+
+
+@pytest_asyncio.fixture
+async def test_materia(db_session, test_tenant):
+    materia = await create_test_materia(
+        db_session,
+        tenant_id=test_tenant.id,
+        codigo="C10C11-MAT",
+    )
+    await db_session.commit()
+    return materia
+
+
+@pytest_asyncio.fixture
+async def test_cohorte(db_session, test_tenant):
+    cohorte = await create_test_cohorte(
+        db_session,
+        tenant_id=test_tenant.id,
+        nombre="C10C11-COH",
+    )
+    await db_session.commit()
+    return cohorte
+
+
+@pytest_asyncio.fixture
+async def test_profesor(db_session, test_tenant):
+    from app.core.permissions import clear_all_caches
+    from app.models.permission import Permission
+    from app.models.role import Role
+    from app.models.role_permission import RolePermission
+
+    clear_all_caches()
+
+    role = Role(tenant_id=test_tenant.id, nombre="PROFESOR", editable=True)
+    db_session.add(role)
+    await db_session.flush()
+    await db_session.refresh(role)
+
+    permisos = []
+    for codigo, modulo, accion in (
+        ("calificaciones:importar", "calificaciones", "importar"),
+        ("atrasados:ver", "atrasados", "ver"),
+    ):
+        permiso = Permission(
+            tenant_id=test_tenant.id,
+            codigo=codigo,
+            modulo=modulo,
+            accion=accion,
+        )
+        db_session.add(permiso)
+        await db_session.flush()
+        await db_session.refresh(permiso)
+        permisos.append(permiso)
+
+    for permiso in permisos:
+        db_session.add(
+            RolePermission(
+                tenant_id=test_tenant.id,
+                rol_id=role.id,
+                permiso_id=permiso.id,
+            )
+        )
+
+    user = await create_test_user(
+        db_session,
+        tenant_id=test_tenant.id,
+        email="profesor@test.com",
+        full_name="Profesor Test",
+        roles=["PROFESOR"],
+    )
+    await db_session.commit()
+    clear_all_caches()
+    return {"id": user.id, "email": "profesor@test.com", "password": "Password123!"}
+
+
+@pytest_asyncio.fixture
+async def test_user_sin_permisos(db_session, test_tenant):
+    from app.core.permissions import clear_all_caches
+
+    clear_all_caches()
+    user = await create_test_user(
+        db_session,
+        tenant_id=test_tenant.id,
+        email="noperms@test.com",
+        full_name="No Perms",
+        roles=["ADMIN"],
+    )
+    await db_session.commit()
+    clear_all_caches()
+    return {"id": user.id, "email": "noperms@test.com", "password": "Password123!"}
+
+
+@pytest_asyncio.fixture
+async def test_padron_entry(db_session, test_tenant, test_materia, test_cohorte):
+    entrada = await create_test_padron_entry(
+        db_session,
+        tenant_id=test_tenant.id,
+        materia_id=test_materia.id,
+        cohorte_id=test_cohorte.id,
+    )
+    await db_session.commit()
+    return {
+        "id": entrada.id,
+        "nombre_completo": f"{entrada.nombre} {entrada.apellidos}",
+    }

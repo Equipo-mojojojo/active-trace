@@ -270,16 +270,23 @@ class AnalisisService:
         self.repo = AnalisisRepository(session, tenant_id)
 
     def _to_entradas(self, rows) -> list[EntradaSimple]:
-        return [
-            EntradaSimple(
-                id=r.id,
-                nombre=r.nombre,
-                apellidos=r.apellidos,
-                comision=r.comision,
-                materia_id=r.materia_id,
+        entradas: list[EntradaSimple] = []
+        for row in rows:
+            materia_id = getattr(
+                row, "_trace_materia_id", getattr(row, "materia_id", None)
             )
-            for r in rows
-        ]
+            if materia_id is None:
+                raise ValueError("EntradaPadron row missing materia_id context")
+            entradas.append(
+                EntradaSimple(
+                    id=row.id,
+                    nombre=row.nombre,
+                    apellidos=row.apellidos,
+                    comision=row.comision,
+                    materia_id=materia_id,
+                )
+            )
+        return entradas
 
     def _to_calificaciones(self, rows) -> list[CalificacionSimple]:
         return [
@@ -336,9 +343,15 @@ class AnalisisService:
             "ranking": [
                 {
                     "entrada_padron_id": str(r.entrada_padron_id),
-                    "nombre": entrada_map[r.entrada_padron_id].nombre if r.entrada_padron_id in entrada_map else "",
-                    "apellidos": entrada_map[r.entrada_padron_id].apellidos if r.entrada_padron_id in entrada_map else "",
-                    "comision": entrada_map[r.entrada_padron_id].comision if r.entrada_padron_id in entrada_map else None,
+                    "nombre": entrada_map[r.entrada_padron_id].nombre
+                    if r.entrada_padron_id in entrada_map
+                    else "",
+                    "apellidos": entrada_map[r.entrada_padron_id].apellidos
+                    if r.entrada_padron_id in entrada_map
+                    else "",
+                    "comision": entrada_map[r.entrada_padron_id].comision
+                    if r.entrada_padron_id in entrada_map
+                    else None,
                     "aprobadas": r.aprobadas,
                 }
                 for r in ranking
@@ -424,16 +437,26 @@ class AnalisisService:
 
         # Apply materia filter
         if materia_id:
-            entradas_orm = [e for e in entradas_orm if e.materia_id == materia_id]
+            entradas_orm = [
+                e
+                for e in entradas_orm
+                if getattr(e, "_trace_materia_id", getattr(e, "materia_id", None))
+                == materia_id
+            ]
         if comision:
             entradas_orm = [e for e in entradas_orm if e.comision == comision]
         if regional:
-            entradas_orm = [e for e in entradas_orm if getattr(e, "regional", None) == regional]
+            entradas_orm = [
+                e for e in entradas_orm if getattr(e, "regional", None) == regional
+            ]
         if q:
             q_lower = q.lower()
             entradas_orm = [
-                e for e in entradas_orm
-                if q_lower in e.nombre.lower() or q_lower in e.apellidos.lower()
+                e
+                for e in entradas_orm
+                if q_lower in e.nombre.lower()
+                or q_lower in e.apellidos.lower()
+                or q_lower in (getattr(e, "email", "") or "").lower()
             ]
 
         # Fetch calificaciones for the filtered entradas
@@ -471,21 +494,29 @@ class AnalisisService:
             if min_aprobadas is not None and aprobadas < min_aprobadas:
                 continue
 
-            entries.append({
-                "entrada_padron_id": str(entrada.id),
-                "nombre": entrada.nombre,
-                "apellidos": entrada.apellidos,
-                "comision": entrada.comision,
-                "regional": getattr(entrada, "regional", None),
-                "materia_id": str(entrada.materia_id),
-                "aprobadas": aprobadas,
-                "reprobadas": reprobadas,
-                "faltantes": faltantes,
-                "atrasado": atrasado,
-            })
+            entries.append(
+                {
+                    "entrada_padron_id": str(entrada.id),
+                    "nombre": entrada.nombre,
+                    "apellidos": entrada.apellidos,
+                    "comision": entrada.comision,
+                    "regional": getattr(entrada, "regional", None),
+                    "materia_id": str(
+                        getattr(
+                            entrada,
+                            "_trace_materia_id",
+                            getattr(entrada, "materia_id", None),
+                        )
+                    ),
+                    "aprobadas": aprobadas,
+                    "reprobadas": reprobadas,
+                    "faltantes": faltantes,
+                    "atrasado": atrasado,
+                }
+            )
 
         total = len(entries)
-        paginated = entries[offset: offset + limit]
+        paginated = entries[offset : offset + limit]
         return {"total": total, "limit": limit, "offset": offset, "entries": paginated}
 
     async def export_sin_corregir_csv(self, materia_id: UUID) -> str:
@@ -495,7 +526,8 @@ class AnalisisService:
 
         # Determine textual activities (not numeric)
         textual_actividades = {
-            c.actividad for c in cals_orm
+            c.actividad
+            for c in cals_orm
             if not c.actividad.strip().lower().endswith("(real)")
             and c.nota_textual is not None
         }
@@ -503,8 +535,10 @@ class AnalisisService:
         # Also include activities where some students have no nota_textual at all
         # We need activities that are textual in nature
         from app.services.calificaciones_parser import TEXTUAL_SCALE_VALUES
+
         textual_by_value = {
-            c.actividad for c in cals_orm
+            c.actividad
+            for c in cals_orm
             if c.nota_textual and c.nota_textual.lower() in TEXTUAL_SCALE_VALUES
         }
         textual_actividades = textual_actividades | textual_by_value
@@ -525,12 +559,14 @@ class AnalisisService:
             if (c.entrada_padron_id, c.actividad) not in graded:
                 entrada = entrada_map.get(c.entrada_padron_id)
                 if entrada:
-                    rows.append({
-                        "nombre": entrada.nombre,
-                        "apellidos": entrada.apellidos,
-                        "comision": entrada.comision or "",
-                        "actividad": c.actividad,
-                    })
+                    rows.append(
+                        {
+                            "nombre": entrada.nombre,
+                            "apellidos": entrada.apellidos,
+                            "comision": entrada.comision or "",
+                            "actividad": c.actividad,
+                        }
+                    )
 
         buf = io.StringIO()
         writer = csv.DictWriter(

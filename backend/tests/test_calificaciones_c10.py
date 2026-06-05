@@ -15,14 +15,23 @@ from __future__ import annotations
 
 import csv
 import io
+from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import create_test_tenant, create_test_user
+from tests.conftest import (
+    create_test_cohorte,
+    create_test_materia,
+    create_test_padron_entry,
+    create_test_tenant,
+    create_test_user,
+    create_test_usuario_docente,
+)
 
 
 # ===========================================================================
@@ -96,16 +105,15 @@ class TestDerivarAprobado:
     def test_textual_not_in_approved_set_is_not_approved(self):
         # Scenario: Textual grade outside approved set is not approved
         assert (
-            self.fn(None, "No satisfactorio", 60, ["Satisfactorio", "Supera lo esperado"])
+            self.fn(
+                None, "No satisfactorio", 60, ["Satisfactorio", "Supera lo esperado"]
+            )
             is False
         )
 
     def test_numeric_takes_precedence_when_both_present(self):
         # Scenario: Numeric grade takes precedence when both fields present
-        assert (
-            self.fn(Decimal("80"), "No satisfactorio", 60, ["Satisfactorio"])
-            is True
-        )
+        assert self.fn(Decimal("80"), "No satisfactorio", 60, ["Satisfactorio"]) is True
 
     def test_numeric_below_threshold_overrides_positive_textual(self):
         # Triangulation: numeric < threshold even when textual would be approved
@@ -225,7 +233,9 @@ class TestParseFilas:
             }
         )
         actividades = [
-            self.ActividadDetectada(nombre="TP1 (Real)", tipo="numerica", muestra_valores=[]),
+            self.ActividadDetectada(
+                nombre="TP1 (Real)", tipo="numerica", muestra_valores=[]
+            ),
         ]
         filas = self.fn(df, actividades, entry_map)
         assert len(filas) == 1
@@ -242,7 +252,9 @@ class TestParseFilas:
             }
         )
         actividades = [
-            self.ActividadDetectada(nombre="TP1", tipo="textual", muestra_valores=["Satisfactorio"]),
+            self.ActividadDetectada(
+                nombre="TP1", tipo="textual", muestra_valores=["Satisfactorio"]
+            ),
         ]
         filas = self.fn(df, actividades, entry_map)
         assert len(filas) == 1
@@ -258,7 +270,9 @@ class TestParseFilas:
             }
         )
         actividades = [
-            self.ActividadDetectada(nombre="TP1 (Real)", tipo="numerica", muestra_valores=[]),
+            self.ActividadDetectada(
+                nombre="TP1 (Real)", tipo="numerica", muestra_valores=[]
+            ),
         ]
         filas = self.fn(df, actividades, {"Ana Lopez": uuid4()})
         assert filas == []
@@ -274,7 +288,10 @@ class TestParseFinalizacion:
     """Unit tests for finalization report parser (RN-07, RN-08)."""
 
     def setup_method(self):
-        from app.services.calificaciones_parser import parse_finalizacion, CalificacionExistente
+        from app.services.calificaciones_parser import (
+            parse_finalizacion,
+            CalificacionExistente,
+        )
         import pandas as pd
 
         self.fn = parse_finalizacion
@@ -349,6 +366,70 @@ class TestParseFinalizacion:
         assert result[0].entrada_padron_id == ep_id_b
 
 
+class TestPadronResolution:
+    """Unit tests for roster resolution in C-10 remediation."""
+
+    @pytest.mark.asyncio
+    async def test_resolver_entradas_uses_assignment_cohort(self):
+        from app.services.calificaciones_service import CalificacionesService
+
+        tenant_id = uuid4()
+        materia_id = uuid4()
+        cohorte_id = uuid4()
+        asignacion_id = uuid4()
+        version_id = uuid4()
+        entrada = SimpleNamespace(id=uuid4(), nombre="Ana", apellidos="Lopez")
+
+        service = CalificacionesService(session=None, tenant_id=tenant_id)
+        service.asig_repo = SimpleNamespace(
+            get_by_id=lambda _id: _async_return(
+                SimpleNamespace(
+                    id=asignacion_id,
+                    materia_id=materia_id,
+                    cohorte_id=cohorte_id,
+                )
+            )
+        )
+        service.padron_repo = SimpleNamespace(
+            obtener_version_activa=lambda _materia_id, _cohorte_id: _async_return(
+                SimpleNamespace(id=version_id)
+            ),
+            listar_versiones_activas_por_materia=lambda _materia_id: _async_return([]),
+            listar_entradas=lambda _version_id: _async_return([entrada]),
+        )
+
+        result = await service._resolver_entradas_padron(materia_id, asignacion_id)
+
+        assert result == [entrada]
+
+    @pytest.mark.asyncio
+    async def test_resolver_entradas_requires_assignment_when_multiple_active_versions(
+        self,
+    ):
+        from app.services.calificaciones_service import (
+            CalificacionesConflictError,
+            CalificacionesService,
+        )
+
+        tenant_id = uuid4()
+        materia_id = uuid4()
+        service = CalificacionesService(session=None, tenant_id=tenant_id)
+        service.padron_repo = SimpleNamespace(
+            listar_versiones_activas_por_materia=lambda _materia_id: _async_return(
+                [SimpleNamespace(id=uuid4()), SimpleNamespace(id=uuid4())]
+            )
+        )
+
+        with pytest.raises(
+            CalificacionesConflictError, match="múltiples padrones activos"
+        ):
+            await service._resolver_entradas_padron(materia_id, asignacion_id=None)
+
+
+async def _async_return(value):
+    return value
+
+
 # ===========================================================================
 # Group 4 — Repository integration (requires TEST_DATABASE_URL)
 # ===========================================================================
@@ -363,12 +444,23 @@ class TestCalificacionesRepository:
 
         tenant = await create_test_tenant(db_session, slug="cal-repo-a")
         repo = CalificacionesRepository(db_session, tenant.id)
-        ep_id = uuid4()
-        materia_id = uuid4()
+        materia = await create_test_materia(
+            db_session, tenant_id=tenant.id, codigo="CAL-REPO-A"
+        )
+        cohorte = await create_test_cohorte(
+            db_session, tenant_id=tenant.id, nombre="CAL-REPO-A"
+        )
+        entrada = await create_test_padron_entry(
+            db_session,
+            tenant_id=tenant.id,
+            materia_id=materia.id,
+            cohorte_id=cohorte.id,
+        )
+        await db_session.commit()
 
         cal = await repo._upsert_fallback(
-            entrada_padron_id=ep_id,
-            materia_id=materia_id,
+            entrada_padron_id=entrada.id,
+            materia_id=materia.id,
             actividad="TP1 (Real)",
             nota_numerica=Decimal("80"),
             nota_textual=None,
@@ -385,12 +477,23 @@ class TestCalificacionesRepository:
 
         tenant = await create_test_tenant(db_session, slug="cal-repo-b")
         repo = CalificacionesRepository(db_session, tenant.id)
-        ep_id = uuid4()
-        materia_id = uuid4()
+        materia = await create_test_materia(
+            db_session, tenant_id=tenant.id, codigo="CAL-REPO-B"
+        )
+        cohorte = await create_test_cohorte(
+            db_session, tenant_id=tenant.id, nombre="CAL-REPO-B"
+        )
+        entrada = await create_test_padron_entry(
+            db_session,
+            tenant_id=tenant.id,
+            materia_id=materia.id,
+            cohorte_id=cohorte.id,
+        )
+        await db_session.commit()
 
         await repo._upsert_fallback(
-            entrada_padron_id=ep_id,
-            materia_id=materia_id,
+            entrada_padron_id=entrada.id,
+            materia_id=materia.id,
             actividad="TP1 (Real)",
             nota_numerica=Decimal("80"),
             nota_textual=None,
@@ -398,15 +501,17 @@ class TestCalificacionesRepository:
             origen="Importado",
         )
         await repo._upsert_fallback(
-            entrada_padron_id=ep_id,
-            materia_id=materia_id,
+            entrada_padron_id=entrada.id,
+            materia_id=materia.id,
             actividad="TP1 (Real)",
             nota_numerica=Decimal("40"),
             nota_textual=None,
             aprobado=False,
             origen="Importado",
         )
-        all_records = await repo.listar_por_entrada_y_actividad(ep_id, "TP1 (Real)")
+        all_records = await repo.listar_por_entrada_y_actividad(
+            entrada.id, "TP1 (Real)"
+        )
         assert len(all_records) == 1
         assert all_records[0].nota_numerica == Decimal("40")
         assert all_records[0].aprobado is False
@@ -418,15 +523,36 @@ class TestUmbralMateriaRepository:
     @pytest.mark.asyncio
     async def test_crear_o_actualizar_creates_new_umbral(self, db_session):
         from app.repositories.calificaciones_repository import UmbralMateriaRepository
+        from app.models.asignacion import Asignacion, RolEnum
 
         tenant = await create_test_tenant(db_session, slug="umbral-repo-a")
         repo = UmbralMateriaRepository(db_session, tenant.id)
-        asignacion_id = uuid4()
-        materia_id = uuid4()
+        materia = await create_test_materia(
+            db_session, tenant_id=tenant.id, codigo="UMB-REPO-A"
+        )
+        usuario = await create_test_usuario_docente(
+            db_session, tenant_id=tenant.id, email="umbra@test.com"
+        )
+        asignacion = Asignacion(
+            tenant_id=tenant.id,
+            usuario_id=usuario.id,
+            rol=RolEnum.PROFESOR,
+            materia_id=materia.id,
+            carrera_id=None,
+            cohorte_id=None,
+            comisiones=None,
+            desde=date.today(),
+            hasta=None,
+            responsable_id=None,
+        )
+        db_session.add(asignacion)
+        await db_session.flush()
+        await db_session.refresh(asignacion)
+        await db_session.commit()
 
         umbral = await repo.crear_o_actualizar(
-            asignacion_id=asignacion_id,
-            materia_id=materia_id,
+            asignacion_id=asignacion.id,
+            materia_id=materia.id,
             umbral_pct=75,
             valores_aprobatorios=["Aprobado"],
         )
@@ -436,25 +562,46 @@ class TestUmbralMateriaRepository:
     @pytest.mark.asyncio
     async def test_crear_o_actualizar_updates_existing_umbral(self, db_session):
         from app.repositories.calificaciones_repository import UmbralMateriaRepository
+        from app.models.asignacion import Asignacion, RolEnum
 
         tenant = await create_test_tenant(db_session, slug="umbral-repo-b")
         repo = UmbralMateriaRepository(db_session, tenant.id)
-        asignacion_id = uuid4()
-        materia_id = uuid4()
+        materia = await create_test_materia(
+            db_session, tenant_id=tenant.id, codigo="UMB-REPO-B"
+        )
+        usuario = await create_test_usuario_docente(
+            db_session, tenant_id=tenant.id, email="umbrb@test.com"
+        )
+        asignacion = Asignacion(
+            tenant_id=tenant.id,
+            usuario_id=usuario.id,
+            rol=RolEnum.PROFESOR,
+            materia_id=materia.id,
+            carrera_id=None,
+            cohorte_id=None,
+            comisiones=None,
+            desde=date.today(),
+            hasta=None,
+            responsable_id=None,
+        )
+        db_session.add(asignacion)
+        await db_session.flush()
+        await db_session.refresh(asignacion)
+        await db_session.commit()
 
         await repo.crear_o_actualizar(
-            asignacion_id=asignacion_id,
-            materia_id=materia_id,
+            asignacion_id=asignacion.id,
+            materia_id=materia.id,
             umbral_pct=60,
             valores_aprobatorios=[],
         )
         await repo.crear_o_actualizar(
-            asignacion_id=asignacion_id,
-            materia_id=materia_id,
+            asignacion_id=asignacion.id,
+            materia_id=materia.id,
             umbral_pct=80,
             valores_aprobatorios=["Excelente"],
         )
-        fetched = await repo.obtener_por_asignacion(asignacion_id)
+        fetched = await repo.obtener_por_asignacion(asignacion.id)
         assert fetched is not None
         assert fetched.umbral_pct == 80
 
@@ -471,7 +618,7 @@ class TestCalificacionesAPIE2E:
 
     def _auth_headers(self, client, email: str, password: str) -> dict:
         resp = client.post(
-            "/api/v1/auth/login", json={"email": email, "password": password}
+            "/api/auth/login", json={"email": email, "password": password}
         )
         assert resp.status_code == 200, resp.text
         return {"Authorization": f"Bearer {resp.json()['access_token']}"}
@@ -494,7 +641,9 @@ class TestCalificacionesAPIE2E:
         self, client, test_tenant, test_materia, test_profesor
     ):
         # Scenario: Preview returns detected activities
-        headers = self._auth_headers(client, test_profesor["email"], "TestPass123!")
+        headers = self._auth_headers(
+            client, test_profesor["email"], test_profesor["password"]
+        )
         csv_bytes = self._csv_calificaciones()
         resp = client.post(
             "/api/v1/calificaciones/preview",
@@ -513,8 +662,12 @@ class TestCalificacionesAPIE2E:
         self, client, test_tenant, test_materia, test_profesor, test_padron_entry
     ):
         # Scenario: Only selected activities are stored; aprobado derived correctly
-        headers = self._auth_headers(client, test_profesor["email"], "TestPass123!")
-        csv_bytes = self._csv_calificaciones(nombre=test_padron_entry["nombre_completo"])
+        headers = self._auth_headers(
+            client, test_profesor["email"], test_profesor["password"]
+        )
+        csv_bytes = self._csv_calificaciones(
+            nombre=test_padron_entry["nombre_completo"]
+        )
         resp = client.post(
             "/api/v1/calificaciones/import",
             files={"file": ("notas.csv", csv_bytes, "text/csv")},
@@ -532,7 +685,9 @@ class TestCalificacionesAPIE2E:
         self, client, test_tenant, test_materia, test_profesor, test_padron_entry
     ):
         # Scenario: Re-import same activity updates existing record
-        headers = self._auth_headers(client, test_profesor["email"], "TestPass123!")
+        headers = self._auth_headers(
+            client, test_profesor["email"], test_profesor["password"]
+        )
 
         def do_import(nota: int):
             rows = [
@@ -564,7 +719,9 @@ class TestCalificacionesAPIE2E:
         self, client, test_tenant, test_materia, test_profesor
     ):
         # Scenario: PROFESOR cannot set threshold for another docente's assignment
-        headers = self._auth_headers(client, test_profesor["email"], "TestPass123!")
+        headers = self._auth_headers(
+            client, test_profesor["email"], test_profesor["password"]
+        )
         resp = client.put(
             "/api/v1/calificaciones/umbral",
             json={
@@ -577,26 +734,20 @@ class TestCalificacionesAPIE2E:
         )
         assert resp.status_code in (403, 404)
 
-    def test_user_without_permission_gets_403(self, client, test_tenant, test_materia):
+    def test_user_without_permission_gets_403(
+        self, client, test_tenant, test_materia, test_user_sin_permisos
+    ):
         # Scenario: User without permission is rejected
         import os
 
         if not os.getenv("TEST_DATABASE_URL"):
             pytest.skip("TEST_DATABASE_URL not set")
 
-        # Create a user with no permissions
-        resp_reg = client.post(
-            "/api/v1/auth/register",
-            json={
-                "email": "noperms@test.com",
-                "password": "TestPass123!",
-                "nombre": "No",
-                "apellidos": "Perms",
-            },
+        headers = self._auth_headers(
+            client,
+            test_user_sin_permisos["email"],
+            test_user_sin_permisos["password"],
         )
-        assert resp_reg.status_code in (200, 201, 409)
-
-        headers = self._auth_headers(client, "noperms@test.com", "TestPass123!")
         csv_bytes = _make_csv([{"Nombre completo": "Test", "TP1 (Real)": 80}])
         resp = client.post(
             "/api/v1/calificaciones/preview",
@@ -610,7 +761,9 @@ class TestCalificacionesAPIE2E:
         self, client, test_tenant, test_materia, test_profesor, test_padron_entry
     ):
         # Scenario: Student with completed textual activity and no grade appears
-        headers = self._auth_headers(client, test_profesor["email"], "TestPass123!")
+        headers = self._auth_headers(
+            client, test_profesor["email"], test_profesor["password"]
+        )
         rows = [
             {
                 "Nombre completo": test_padron_entry["nombre_completo"],

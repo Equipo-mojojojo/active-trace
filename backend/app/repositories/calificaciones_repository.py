@@ -13,7 +13,7 @@ from __future__ import annotations
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,10 +55,12 @@ class CalificacionesRepository(TenantScopedRepository[Calificacion]):
                 origen=origen,
             )
             .on_conflict_do_update(
-                index_elements=None,
-                constraint=None,
-                # The partial unique index name from the migration
-                index_where=text("deleted_at IS NULL"),
+                index_elements=[
+                    Calificacion.tenant_id,
+                    Calificacion.entrada_padron_id,
+                    Calificacion.actividad,
+                ],
+                index_where=Calificacion.deleted_at.is_(None),
                 set_={
                     "nota_numerica": nota_numerica,
                     "nota_textual": nota_textual,
@@ -78,6 +80,7 @@ class CalificacionesRepository(TenantScopedRepository[Calificacion]):
             await self.session.flush()
             return row
         except Exception:
+            await self.session.rollback()
             # Fallback for test environments without PostgreSQL
             return await self._upsert_fallback(
                 entrada_padron_id=entrada_padron_id,
@@ -155,9 +158,7 @@ class UmbralMateriaRepository(TenantScopedRepository[UmbralMateria]):
     def __init__(self, session: AsyncSession, tenant_id: UUID | str):
         super().__init__(session, UmbralMateria, tenant_id)
 
-    async def obtener_por_asignacion(
-        self, asignacion_id: UUID
-    ) -> UmbralMateria | None:
+    async def obtener_por_asignacion(self, asignacion_id: UUID) -> UmbralMateria | None:
         stmt = self._statement().where(UmbralMateria.asignacion_id == asignacion_id)
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()

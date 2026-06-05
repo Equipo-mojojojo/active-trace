@@ -17,7 +17,16 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_user, get_db
@@ -33,6 +42,7 @@ from app.schemas.calificaciones import (
 from app.services.audit_service import AuditService, get_request_context
 from app.services.calificaciones_parser import CalificacionesParseError
 from app.services.calificaciones_service import (
+    CalificacionesConflictError,
     CalificacionesForbiddenError,
     CalificacionesNotFoundError,
     CalificacionesService,
@@ -41,7 +51,9 @@ from app.services.calificaciones_service import (
 router = APIRouter(prefix="/api/v1/calificaciones", tags=["calificaciones"])
 
 
-def _build_service(user: User, db: AsyncSession, request: Request) -> CalificacionesService:
+def _build_service(
+    user: User, db: AsyncSession, request: Request
+) -> CalificacionesService:
     ctx = get_request_context(request)
     audit = AuditService(db=db, tenant_id=user.tenant_id, **ctx)
     return CalificacionesService(session=db, tenant_id=user.tenant_id, audit=audit)
@@ -75,7 +87,9 @@ async def preview_calificaciones(
             materia_id=materia_id,
         )
     except CalificacionesParseError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        )
     return result
 
 
@@ -112,7 +126,13 @@ async def importar_calificaciones(
             asignacion_id=asignacion_id,
         )
     except CalificacionesParseError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        )
+    except CalificacionesConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except CalificacionesNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     return result
 
 
@@ -178,5 +198,11 @@ async def preview_finalizacion(
             materia_id=materia_id,
         )
     except CalificacionesParseError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        )
+    except CalificacionesConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except CalificacionesNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     return result

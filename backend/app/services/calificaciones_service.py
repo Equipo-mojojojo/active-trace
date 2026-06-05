@@ -16,15 +16,18 @@ import logging
 from decimal import Decimal
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit_constants import AuditAction
 from app.models.calificacion import DEFAULT_UMBRAL_PCT, DEFAULT_VALORES_APROBATORIOS
+from app.models.padron import EntradaPadron
 from app.repositories.asignacion_repository import AsignacionRepository
 from app.repositories.calificaciones_repository import (
     CalificacionesRepository,
     UmbralMateriaRepository,
 )
+from app.repositories.padron_repository import PadronRepository
 from app.services.audit_service import AuditService  # noqa: F401 — re-exported for router
 from app.services.calificaciones_parser import (
     ActividadDetectada,
@@ -48,6 +51,10 @@ class CalificacionesNotFoundError(LookupError):
     """Raised when a required resource (asignacion, etc.) is not found."""
 
 
+class CalificacionesConflictError(RuntimeError):
+    """Raised when the academic context is ambiguous for the requested action."""
+
+
 def derivar_aprobado(
     nota_numerica: Decimal | None,
     nota_textual: str | None,
@@ -68,7 +75,9 @@ def derivar_aprobado(
     return False
 
 
-def _resolve_umbral(umbral_pct: int | None, valores: list[str] | None) -> tuple[int, list[str]]:
+def _resolve_umbral(
+    umbral_pct: int | None, valores: list[str] | None
+) -> tuple[int, list[str]]:
     """Apply defaults when UmbralMateria is absent."""
     pct = umbral_pct if umbral_pct is not None else DEFAULT_UMBRAL_PCT
     vals = valores if valores else DEFAULT_VALORES_APROBATORIOS
@@ -89,7 +98,52 @@ class CalificacionesService:
         self.cal_repo = CalificacionesRepository(session, tenant_id)
         self.umbral_repo = UmbralMateriaRepository(session, tenant_id)
         self.asig_repo = AsignacionRepository(session, tenant_id)
+        self.padron_repo = PadronRepository(session, tenant_id)
         self._audit = audit
+
+    async def _resolver_entradas_padron(
+        self,
+        materia_id: UUID,
+        asignacion_id: UUID | None,
+    ) -> list[EntradaPadron]:
+        """Resolve roster entries against the active versioned padrón for a materia."""
+        cohorte_id: UUID | None = None
+
+        if asignacion_id is not None:
+            asignacion = await self.asig_repo.get_by_id(asignacion_id)
+            if asignacion is None:
+                raise CalificacionesNotFoundError(
+                    f"Asignacion {asignacion_id} not found"
+                )
+            if str(asignacion.materia_id) != str(materia_id):
+                raise CalificacionesNotFoundError(
+                    "La asignación indicada no corresponde a la materia solicitada."
+                )
+            cohorte_id = asignacion.cohorte_id
+
+        if cohorte_id is not None:
+            version = await self.padron_repo.obtener_version_activa(
+                materia_id, cohorte_id
+            )
+            if version is None:
+                raise CalificacionesNotFoundError(
+                    "No existe un padrón activo para la materia y cohorte indicadas."
+                )
+            return await self.padron_repo.listar_entradas(version.id)
+
+        versiones_activas = await self.padron_repo.listar_versiones_activas_por_materia(
+            materia_id
+        )
+        if not versiones_activas:
+            raise CalificacionesNotFoundError(
+                "No existe un padrón activo para la materia indicada."
+            )
+        if len(versiones_activas) > 1:
+            raise CalificacionesConflictError(
+                "Hay múltiples padrones activos para la materia. Indicá asignacion_id para resolver la cohorte."
+            )
+
+        return await self.padron_repo.listar_entradas(versiones_activas[0].id)
 
     async def preview_importacion(
         self,
@@ -98,8 +152,6 @@ class CalificacionesService:
         materia_id: UUID,
     ) -> dict:
         """Parse the LMS file and return detected activities WITHOUT writing (D4)."""
-        import pandas as pd
-
         df = parse_calificaciones_file(file_bytes, filename)
         actividades = detectar_actividades(df)
         return {
@@ -123,11 +175,7 @@ class CalificacionesService:
         asignacion_id: UUID | None = None,
     ) -> dict:
         """Parse, derive aprobado, upsert, audit. Returns count of imported rows."""
-        import pandas as pd
-        from app.repositories.padron_repository import PadronRepository
-        from sqlalchemy import select
-        from app.models.padron import EntradaPadron
-
+        actor_id = actor.id
         df = parse_calificaciones_file(file_bytes, filename)
         todas_actividades = detectar_actividades(df)
         actividades_sel = [
@@ -144,14 +192,7 @@ class CalificacionesService:
                     umbral.umbral_pct, umbral.valores_aprobatorios
                 )
 
-        # Build nombre_completo → entrada_padron_id map from active padron
-        stmt = select(EntradaPadron).where(
-            EntradaPadron.tenant_id == self.tenant_id,
-            EntradaPadron.materia_id == materia_id,
-            EntradaPadron.deleted_at.is_(None),
-        )
-        result = await self.session.execute(stmt)
-        entradas = result.scalars().all()
+        entradas = await self._resolver_entradas_padron(materia_id, asignacion_id)
         entry_map: dict[str, UUID] = {
             f"{e.nombre} {e.apellidos}": e.id for e in entradas
         }
@@ -176,7 +217,7 @@ class CalificacionesService:
 
         if self._audit:
             await self._audit.register(
-                actor_id=actor.id,
+                actor_id=actor_id,
                 accion=AuditAction.CALIFICACIONES_IMPORTAR,
                 materia_id=materia_id,
                 detalle={"filas_importadas": count},
@@ -203,7 +244,11 @@ class CalificacionesService:
 
         # Check ownership for PROFESOR role
         actor_roles = [r.nombre for r in getattr(actor, "roles", [])]
-        if "PROFESOR" in actor_roles and "COORDINADOR" not in actor_roles and "ADMIN" not in actor_roles:
+        if (
+            "PROFESOR" in actor_roles
+            and "COORDINADOR" not in actor_roles
+            and "ADMIN" not in actor_roles
+        ):
             if str(asignacion.usuario_id) != str(actor.id):
                 raise CalificacionesForbiddenError(
                     "PROFESOR can only configure threshold for their own assignment"
@@ -229,20 +274,11 @@ class CalificacionesService:
         materia_id: UUID,
     ) -> dict:
         """Parse LMS completion report; return ungraded textual entries (no writes)."""
-        from sqlalchemy import select
-        from app.models.padron import EntradaPadron
         from app.models.calificacion import Calificacion
 
         df = parse_calificaciones_file(file_bytes, filename)
 
-        # Build entry map
-        stmt = select(EntradaPadron).where(
-            EntradaPadron.tenant_id == self.tenant_id,
-            EntradaPadron.materia_id == materia_id,
-            EntradaPadron.deleted_at.is_(None),
-        )
-        result = await self.session.execute(stmt)
-        entradas = result.scalars().all()
+        entradas = await self._resolver_entradas_padron(materia_id, asignacion_id=None)
         entry_map: dict[str, UUID] = {
             f"{e.nombre} {e.apellidos}": e.id for e in entradas
         }
@@ -271,7 +307,9 @@ class CalificacionesService:
         else:
             existing_cals = []
 
-        pendientes = parse_finalizacion(df, entry_map, existing_cals, textual_activities)
+        pendientes = parse_finalizacion(
+            df, entry_map, existing_cals, textual_activities
+        )
         return {
             "pendientes": [
                 {

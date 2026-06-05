@@ -13,10 +13,22 @@ UmbralMateria: approval threshold per assignment (D3).
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import ARRAY, Boolean, ForeignKey, Integer, Numeric, String, Text, Uuid
+from sqlalchemy import (
+    ARRAY,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    Uuid,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -50,6 +62,9 @@ class Calificacion(Base, TenantScopedModelMixin):
     origen: Mapped[str] = mapped_column(
         String(20), nullable=False, default="Importado"
     )  # "Importado" | "Manual"
+    importado_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
     def __repr__(self) -> str:
         return (

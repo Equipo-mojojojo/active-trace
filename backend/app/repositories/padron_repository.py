@@ -111,6 +111,21 @@ class PadronRepository(TenantScopedRepository[VersionPadron]):
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def listar_versiones_activas_por_materia(
+        self,
+        materia_id: UUID,
+        include_deleted: bool = False,
+    ) -> list[VersionPadron]:
+        """List active versions for a materia across all cohortes in the tenant."""
+        stmt = (
+            self._statement(include_deleted=include_deleted)
+            .where(VersionPadron.materia_id == materia_id)
+            .where(VersionPadron.activa.is_(True))
+            .order_by(desc(VersionPadron.created_at))
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def soft_delete_version(self, version_id: UUID) -> VersionPadron | None:
         """Soft-delete a VersionPadron (sets deleted_at and activa=False)."""
         version = await self.get_by_id(version_id)
