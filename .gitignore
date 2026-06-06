@@ -1,0 +1,36 @@
+# Build output intermedio (regenerable con `npm run pdf` desde .build/)
+.build/node_modules/
+.build/activia-trace-doc.html
+.build/package-lock.json
+
+# PDF generado (es regenerable; descomentar si NO querés versionarlo)
+# activia-trace-documentacion.pdf
+
+# OS / IDE
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Engram (datos locales del agente, no del proyecto)
+.engram/
+
+# Entornos virtuales
+.venv/
+venv/
+
+# Node (por si aparece frontend)
+node_modules/
+
+# Variables de entorno
+.env
+.env.local
+.env.*.local
+
+# OpenSpec: archives de changes completados (los specs ya están sincronizados en openspec/specs/)
+openspec/changes/archive/
