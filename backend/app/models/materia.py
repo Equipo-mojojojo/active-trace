@@ -19,3 +19,4 @@ class Materia(Base, TenantScopedModelMixin):
     estado: Mapped[EstadoActivo] = mapped_column(
         String(20), nullable=False, default=EstadoActivo.ACTIVA
     )
+    grupo_plus_clave: Mapped[str | None] = mapped_column(String(100), nullable=True)

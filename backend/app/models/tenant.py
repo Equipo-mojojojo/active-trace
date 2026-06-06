@@ -16,3 +16,4 @@ class Tenant(Base, BaseModelMixin):
         nullable=False,
         default=False,
     )
+    tope_plus: Mapped[int | None] = mapped_column(nullable=True)

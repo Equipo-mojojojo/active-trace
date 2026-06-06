@@ -65,6 +65,13 @@ class Usuario(Base, TenantScopedModelMixin):
         EncryptedString(), nullable=True
     )  # Alias for CBU
 
+    # Profile fields
+    banco: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    regional: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    legajo_profesional: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    facturador: Mapped[bool] = mapped_column(nullable=False, default=False)
+    modalidad_cobro: Mapped[str] = mapped_column(String(20), nullable=False, default="liquidacion")
+
     # Status
     estado: Mapped[UsuarioEstado] = mapped_column(
         SQLEnum(UsuarioEstado),

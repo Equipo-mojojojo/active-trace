@@ -26,6 +26,11 @@ from app.models.enums import (
     TipoEvaluacion,
 )
 from app.models.evaluacion import Evaluacion
+from app.models.factura import EstadoFactura, Factura
+from app.models.mensaje_interno import MensajeInterno
+from app.models.liquidacion import EstadoLiquidacion, Liquidacion
+from app.models.salario_base import SalarioBase
+from app.models.salario_plus import SalarioPlus
 from app.models.fecha_academica import FechaAcademica
 from app.models.guardia import Guardia
 from app.models.instancia_encuentro import InstanciaEncuentro
@@ -70,7 +75,14 @@ __all__ = [
     "EstadoGuardia",
     "EstadoReserva",
     "EstadoTarea",
+    "EstadoFactura",
+    "EstadoLiquidacion",
+    "MensajeInterno",
     "Evaluacion",
+    "Factura",
+    "Liquidacion",
+    "SalarioBase",
+    "SalarioPlus",
     "FechaAcademica",
     "Guardia",
     "InstanciaEncuentro",

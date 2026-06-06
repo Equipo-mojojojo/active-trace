@@ -1,11 +1,8 @@
-# audit-admin-api Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change c-05-audit-log. Update Purpose after archive.
-## Requirements
 ### Requirement: El sistema SHALL exponer una API REST de consulta del log de auditoría
 
-El sistema SHALL proveer `GET /api/admin/audit-log` protegido con `require_permission("auditoria:ver")` que devuelva registros de auditoría paginados con filtros.
+El sistema SHALL proveer `GET /api/admin/audit-log` protegido con `require_permission("auditoria:ver")` que devuelva registros de auditoría paginados con filtros. **El endpoint ahora acepta el parámetro opcional `?limite=N` (default y cap: 200) para limitar la cantidad de registros retornados. El rol FINANZAS tiene acceso de lectura (`auditoria:ver`).**
 
 #### Scenario: Consultar log sin filtros
 - **WHEN** un usuario con permiso `auditoria:ver` solicita GET /api/admin/audit-log
@@ -37,3 +34,14 @@ El sistema SHALL proveer `GET /api/admin/audit-log` protegido con `require_permi
 - **WHEN** un usuario con solo `auditoria:ver:propio` solicita GET /api/admin/audit-log
 - **THEN** el sistema SHALL devolver solo registros donde actor_id = usuario actual
 
+#### Scenario: FINANZAS puede acceder al log de auditoría
+- **WHEN** un usuario con rol FINANZAS solicita GET /api/admin/audit-log
+- **THEN** el sistema SHALL devolver status 200 con los registros del tenant
+
+#### Scenario: Aplicar límite configurable en la respuesta
+- **WHEN** se solicita con `?limite=50`
+- **THEN** el sistema devuelve como máximo 50 registros
+
+#### Scenario: Límite superior al cap retorna el cap silenciosamente
+- **WHEN** se solicita con `?limite=999` y el cap es 200
+- **THEN** el sistema devuelve como máximo 200 registros sin error
