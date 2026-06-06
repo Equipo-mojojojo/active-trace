@@ -17,8 +17,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# Engram (datos locales del agente, no del proyecto)
-.engram/
+# Engram — chunks de sync para el equipo (sí se versiona)
+# .engram/
 
 # Entornos virtuales
 .venv/
