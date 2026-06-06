@@ -26,9 +26,11 @@ from app.models.enums import (
     TipoEvaluacion,
 )
 from app.models.evaluacion import Evaluacion
+from app.models.fecha_academica import FechaAcademica
 from app.models.guardia import Guardia
 from app.models.instancia_encuentro import InstanciaEncuentro
 from app.models.materia import Materia
+from app.models.programa_materia import ProgramaMateria
 from app.models.padron import EntradaPadron, VersionPadron
 from app.models.tarea import Tarea
 from app.models.password_reset_token import PasswordResetToken
@@ -69,10 +71,12 @@ __all__ = [
     "EstadoReserva",
     "EstadoTarea",
     "Evaluacion",
+    "FechaAcademica",
     "Guardia",
     "InstanciaEncuentro",
     "Materia",
     "PasswordResetToken",
+    "ProgramaMateria",
     "Permission",
     "RefreshToken",
     "ReservaEvaluacion",

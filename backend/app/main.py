@@ -16,10 +16,12 @@ from app.api.v1.routers.audit import router as audit_router
 from app.api.v1.routers.auth import router as auth_router
 from app.api.v1.routers.carreras import router as carreras_router
 from app.api.v1.routers.cohortes import router as cohortes_router
+from app.api.v1.routers.fechas_academicas import router as fechas_academicas_router
 from app.api.v1.routers.guardias import router as guardias_router
 from app.api.v1.routers.health import router as health_router
 from app.api.v1.routers.impersonacion import router as impersonacion_router
 from app.api.v1.routers.materias import router as materias_router
+from app.api.v1.routers.programas import router as programas_router
 from app.api.v1.routers.padron import router as padron_router
 from app.api.v1.routers.roles import router as roles_router
 from app.api.v1.routers.tareas import router as tareas_router
@@ -63,6 +65,7 @@ def create_app() -> FastAPI:
     application.include_router(comunicaciones_router)
     application.include_router(encuentros_router)
     application.include_router(equipos_router)
+    application.include_router(fechas_academicas_router)
     application.include_router(guardias_router)
     application.include_router(audit_router)
     application.include_router(auth_router)
@@ -72,6 +75,7 @@ def create_app() -> FastAPI:
     application.include_router(impersonacion_router)
     application.include_router(materias_router)
     application.include_router(padron_router)
+    application.include_router(programas_router)
     application.include_router(roles_router)
     application.include_router(tareas_router)
     application.include_router(usuarios_router)
