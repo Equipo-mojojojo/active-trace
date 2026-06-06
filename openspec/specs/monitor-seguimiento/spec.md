@@ -24,6 +24,10 @@ The monitor endpoint SHALL accept optional filters: `materia_id`, `comision`, `r
 - **WHEN** `min_aprobadas=3` is provided and student A has 2 approved activities
 - **THEN** student A does NOT appear in the filtered results
 
+#### Scenario: Free text search matches student email
+- **WHEN** `q` matches part of the student's email address within the actor scope
+- **THEN** the monitor includes that student in the filtered response
+
 ### Requirement: COORDINADOR and ADMIN can filter by date range
 When the actor is COORDINADOR or ADMIN, the monitor endpoint SHALL accept `fecha_desde` and `fecha_hasta` parameters to filter calificaciones by `importado_at` (F2.9).
 
@@ -34,6 +38,10 @@ When the actor is COORDINADOR or ADMIN, the monitor endpoint SHALL accept `fecha
 #### Scenario: PROFESOR cannot use date range filters
 - **WHEN** a PROFESOR provides `fecha_desde` and `fecha_hasta`
 - **THEN** those parameters are silently ignored (scope enforcement only)
+
+#### Scenario: Date filter uses persisted import timestamp
+- **WHEN** the monitor evaluates the date range for imported grades
+- **THEN** it uses the persisted `importado_at` field of each `Calificacion` as source of truth
 
 ### Requirement: Monitor response is paginated
 The monitor endpoint SHALL support `limit` (default 1000, max 1000) and `offset` (default 0) query parameters.

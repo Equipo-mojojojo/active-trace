@@ -31,3 +31,9 @@
   ```
 
   Requiere `TEST_DATABASE_URL` configurada; de lo contrario, pytest saltará los casos que dependen de DB.
+
+- C-12 comunicaciones + worker:
+
+  ```bash
+  pytest tests/test_comunicacion_c12.py
+  ```

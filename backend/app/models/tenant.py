@@ -12,3 +12,7 @@ class Tenant(Base, BaseModelMixin):
 
     slug: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    communication_approval_required: Mapped[bool] = mapped_column(
+        nullable=False,
+        default=False,
+    )

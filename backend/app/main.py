@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from app.api.v1.routers.analisis import router as analisis_router
 from app.api.v1.routers.asignaciones import router as asignaciones_router
 from app.api.v1.routers.calificaciones import router as calificaciones_router
+from app.api.v1.routers.comunicaciones import router as comunicaciones_router
 from app.api.v1.routers.equipos import router as equipos_router
 from app.api.v1.routers.audit import router as audit_router
 from app.api.v1.routers.auth import router as auth_router
@@ -52,6 +53,7 @@ def create_app() -> FastAPI:
     application.include_router(analisis_router)
     application.include_router(asignaciones_router)
     application.include_router(calificaciones_router)
+    application.include_router(comunicaciones_router)
     application.include_router(equipos_router)
     application.include_router(audit_router)
     application.include_router(auth_router)

@@ -8,6 +8,7 @@ from app.models.base import BaseModelMixin, TenantScopedModelMixin
 from app.models.calificacion import Calificacion, UmbralMateria
 from app.models.carrera import Carrera
 from app.models.cohorte import Cohorte
+from app.models.comunicacion import Comunicacion, EstadoComunicacion
 from app.models.enums import EstadoActivo
 from app.models.materia import Materia
 from app.models.padron import EntradaPadron, VersionPadron
@@ -29,7 +30,9 @@ __all__ = [
     "Calificacion",
     "Carrera",
     "Cohorte",
+    "Comunicacion",
     "EntradaPadron",
+    "EstadoComunicacion",
     "EstadoActivo",
     "Materia",
     "PasswordResetToken",
