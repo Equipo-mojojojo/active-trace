@@ -53,6 +53,9 @@ class AuditAction(StrEnum):
 
     # ── Comunicaciones ──────────────────────────────────────────────
     COMUNICACION_ENVIAR = "COMUNICACION_ENVIAR"
+    COMUNICACION_CANCELAR = "COMUNICACION_CANCELAR"
+    COMUNICACION_APROBAR = "COMUNICACION_APROBAR"
+    COMUNICACION_RECHAZAR = "COMUNICACION_RECHAZAR"
 
     # ── Equipos docentes ────────────────────────────────────────────
     ASIGNACION_MODIFICAR = "ASIGNACION_MODIFICAR"

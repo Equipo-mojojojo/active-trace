@@ -77,7 +77,7 @@ $env:TEST_DATABASE_URL="postgresql+asyncpg://activia:activia@localhost:5432/acti
 python -m pytest tests -v
 ```
 
-Resultado esperado: **267 passed**.
+Resultado esperado: **267+ passed** (aumenta con cada change implementado).
 
 ---
 
@@ -91,6 +91,20 @@ docker-compose up --build
 La API queda disponible en:
 - `http://localhost:8000` — API
 - `http://localhost:8000/docs` — Swagger UI
+
+### Worker de comunicaciones (C-12)
+
+El worker de despacho corre como proceso separado:
+
+```bash
+# Desde backend/
+python -m app.workers.main
+```
+
+Variables de entorno opcionales del worker:
+```env
+WORKER_MAX_RETRIES=3    # reintentos antes de marcar Error (default: 3)
+```
 
 ---
 
@@ -133,8 +147,9 @@ active-trace/
 | C-09 | Padrón e ingesta Moodle | Completo |
 | C-10 | Calificaciones y umbral | Completo |
 | C-11 | Análisis atrasados y reportes | Completo |
+| C-12 | Comunicaciones salientes + cola worker | Completo |
 
-Próximo: **C-12** comunicaciones + worker, **C-21** frontend shell.
+Próximo: **C-13** encuentros/coloquios, **C-21** frontend shell.
 
 ---
 
