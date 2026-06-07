@@ -66,5 +66,23 @@ class AuditAction(StrEnum):
     IMPERSONACION_INICIAR = "IMPERSONACION_INICIAR"
     IMPERSONACION_FINALIZAR = "IMPERSONACION_FINALIZAR"
 
+    # ── Encuentros y Guardias ────────────────────────────────────────
+    ENCUENTRO_CREAR = "ENCUENTRO_CREAR"
+    ENCUENTRO_EDITAR = "ENCUENTRO_EDITAR"
+    GUARDIA_REGISTRAR = "GUARDIA_REGISTRAR"
+
+    # ── Coloquios / Evaluaciones ──────────────────────────────────────
+    COLOQUIO_CREAR = "COLOQUIO_CREAR"
+    COLOQUIO_RESERVAR = "COLOQUIO_RESERVAR"
+    COLOQUIO_RESULTADO = "COLOQUIO_RESULTADO"
+
+    # ── Avisos ──────────────────────────────────────────────────────
+    AVISO_PUBLICAR = "AVISO_PUBLICAR"
+    AVISO_ACK = "AVISO_ACK"
+
+    # ── Tareas internas ─────────────────────────────────────────────
+    TAREA_CREAR = "TAREA_CREAR"
+    TAREA_COMENTAR = "TAREA_COMENTAR"
+
     # ── Configuración del sistema ───────────────────────────────────
     CONFIGURACION_MODIFICAR = "CONFIGURACION_MODIFICAR"

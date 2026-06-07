@@ -241,12 +241,10 @@ def upgrade() -> None:
     # -----------------------------------------------------------------------
     conn = op.get_bind()
 
-    # Seed only if a tenant already exists — skip on fresh DB installs
+    # Resolve or create a default tenant for seed
     result = conn.execute(sa.text("SELECT id FROM tenant LIMIT 1"))
     row = result.fetchone()
-    if row is None:
-        return
-    default_tenant_id = str(row[0])
+    default_tenant_id = str(row[0]) if row else str(uuid4())
 
     # Build a lookup map: perm_code → perm_id (will be populated after insert)
     perm_id_by_code: dict[str, str] = {}

@@ -17,7 +17,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0009_seed_atrasados_permission"
-down_revision = "0008_calificacion_umbral"
+down_revision = "0008_create_calificacion_umbral_tables"
 branch_labels = None
 depends_on = None
 

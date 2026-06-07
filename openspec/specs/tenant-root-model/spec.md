@@ -1,13 +1,22 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Tenant como raíz persistente del sistema
 
-El sistema SHALL definir una entidad persistente `Tenant` que represente a cada institución y funcione como raíz de pertenencia para el resto del modelo de datos. Toda entidad futura del dominio SHALL poder referenciar un `tenant_id` válido derivado de esta raíz.
+El sistema SHALL definir una entidad persistente `Tenant` que represente a cada institución y funcione como raíz de pertenencia para el resto del modelo de datos. Toda entidad futura del dominio SHALL poder referenciar un `tenant_id` válido derivado de esta raíz. **El Tenant ahora incluye el campo `tope_plus` (nullable INT): si está definido, limita la cantidad de comisiones con plus que se acumulan en el cálculo de liquidación. Si es null, la acumulación es ilimitada (PA-23).**
 
 #### Scenario: Creación de tenant
 - **WHEN** se persiste una nueva institución en la base de datos
-- **THEN** el sistema crea un registro `Tenant` con identidad UUID interna única
+- **THEN** el sistema crea un registro `Tenant` con identidad UUID interna única y `tope_plus = null`
 - **AND** ese registro puede ser referenciado por entidades dependientes mediante `tenant_id`
+
+#### Scenario: Configurar tope_plus en tenant
+- **WHEN** un ADMIN actualiza `tope_plus = 3` en la configuración del tenant
+- **THEN** el sistema acepta el valor y lo persiste
+- **AND** el motor de liquidación respeta ese tope en cálculos futuros del mismo tenant
+
+#### Scenario: Tenant sin tope_plus aplica acumulación ilimitada
+- **WHEN** `Tenant.tope_plus` es null
+- **THEN** el motor de liquidación acumula plus de todas las comisiones activas con `grupo_plus_clave` sin límite
 
 ### Requirement: Mixins base con identidad y timestamps
 

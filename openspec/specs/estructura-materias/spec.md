@@ -1,12 +1,12 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Administrar materias del tenant
 The system SHALL provide full CRUD operations for the `Materia` entity, scoped to the authenticated user's tenant.
-`Materia` is the tenant-wide subject catalog (e.g., "Programación I" with code "PROG_I"). Per ADR-006, this is a unique catalog; instance-level data (Dictado) comes in a later change.
+`Materia` is the tenant-wide subject catalog (e.g., "Programación I" with code "PROG_I"). Per ADR-006, this is a unique catalog; instance-level data (Dictado) comes in a later change. **Materia now includes the field `grupo_plus_clave` (nullable TEXT) that maps the subject to a plus salary group for liquidation purposes. If null, the subject generates no plus.**
 
 #### Scenario: Crear materia exitosamente
 - **WHEN** an ADMIN sends a POST to `/api/admin/materias` with valid `codigo` and `nombre`
-- **THEN** the system returns 201 Created with the full Materia object including `id`, `estado: "Activa"`, and timestamps
+- **THEN** the system returns 201 Created with the full Materia object including `id`, `estado: "Activa"`, `grupo_plus_clave: null`, and timestamps
 
 #### Scenario: Crear materia con código duplicado en el mismo tenant
 - **WHEN** an ADMIN sends a POST to `/api/admin/materias` with a `codigo` that already exists for the same tenant
@@ -26,7 +26,7 @@ The system SHALL provide full CRUD operations for the `Materia` entity, scoped t
 
 #### Scenario: Obtener materia por ID existente
 - **WHEN** an ADMIN sends a GET to `/api/admin/materias/{id}` with a valid ID
-- **THEN** the system returns 200 with the full Materia object
+- **THEN** the system returns 200 with the full Materia object including `grupo_plus_clave`
 
 #### Scenario: Obtener materia por ID inexistente
 - **WHEN** an ADMIN sends a GET to `/api/admin/materias/{id}` with a non-existent ID
@@ -35,6 +35,16 @@ The system SHALL provide full CRUD operations for the `Materia` entity, scoped t
 #### Scenario: Actualizar materia exitosamente
 - **WHEN** an ADMIN sends a PUT to `/api/admin/materias/{id}` with valid fields
 - **THEN** the system returns 200 with the updated Materia object
+
+#### Scenario: Asignar grupo_plus_clave a materia
+- **WHEN** an ADMIN sends a PUT to `/api/admin/materias/{id}` with `grupo_plus_clave: "PROG"`
+- **THEN** the system returns 200 and the materia now has `grupo_plus_clave = "PROG"`
+- **AND** the materia will generate plus in future liquidation calculations for the "PROG" group
+
+#### Scenario: Quitar grupo_plus_clave de materia
+- **WHEN** an ADMIN sends a PUT to `/api/admin/materias/{id}` with `grupo_plus_clave: null`
+- **THEN** the system returns 200 and the materia has `grupo_plus_clave = null`
+- **AND** the materia will not generate plus in future liquidation calculations
 
 #### Scenario: Soft delete materia
 - **WHEN** an ADMIN sends a DELETE to `/api/admin/materias/{id}`
