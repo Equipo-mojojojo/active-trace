@@ -111,14 +111,33 @@ def _encode_jwt(payload: dict[str, Any], expires_delta: timedelta) -> str:
     )
 
 
-def create_access_token(*, user_id: str, tenant_id: str, roles: list[str]) -> str:
+def create_access_token(
+    *,
+    user_id: str,
+    tenant_id: str,
+    roles: list[str],
+    es_impersonacion: bool = False,
+    impersonado_id: str | None = None,
+) -> str:
+    """Create a JWT access token.
+
+    When impersonating, the token carries extra claims:
+    ``es_impersonacion: true`` and ``impersonado_id`` (the user being
+    impersonated). The ``sub`` claim always identifies the real user
+    (who logged in / who initiated the impersonation).
+    """
     settings = get_settings()
-    payload = {
+    payload: dict[str, object] = {
         "sub": user_id,
         "tenant_id": tenant_id,
         "roles": roles,
         "type": "access",
     }
+    if es_impersonacion:
+        payload["es_impersonacion"] = True
+        if impersonado_id is not None:
+            payload["impersonado_id"] = impersonado_id
+
     return _encode_jwt(
         payload,
         timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),

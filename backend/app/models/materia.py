@@ -1,0 +1,22 @@
+from __future__ import annotations
+
+from sqlalchemy import String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+from app.models.base import TenantScopedModelMixin
+from app.models.enums import EstadoActivo
+
+
+class Materia(Base, TenantScopedModelMixin):
+    __tablename__ = "materia"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "codigo", name="uq_materia_tenant_codigo"),
+    )
+
+    codigo: Mapped[str] = mapped_column(String(50), nullable=False)
+    nombre: Mapped[str] = mapped_column(String(255), nullable=False)
+    estado: Mapped[EstadoActivo] = mapped_column(
+        String(20), nullable=False, default=EstadoActivo.ACTIVA
+    )
+    grupo_plus_clave: Mapped[str | None] = mapped_column(String(100), nullable=True)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,9 +28,20 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def get_current_user(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     token: str = Depends(oauth2_scheme),
 ):
+    """Resolve the current authenticated user from the JWT.
+
+    Under impersonation, returns the impersonated user (the one being
+    acted *as*) while preserving the real actor's identity in
+    ``request.state.actor_real_id`` and
+    ``request.state.actor_real_tenant_id``.
+
+    The ``request.state`` fields set here are consumed by
+    ``AuditService`` to correctly attribute actions.
+    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -49,6 +60,25 @@ async def get_current_user(
     if user_id is None or tenant_id is None or not isinstance(roles, list):
         raise credentials_exception
 
+    # ── Impersonation branch ───────────────────────────────────────
+    if payload.get("es_impersonacion") and payload.get("impersonado_id"):
+        # The real actor is in `sub`; save it for AuditService
+        request.state.actor_real_id = user_id
+        request.state.actor_real_tenant_id = tenant_id
+
+        # Load the impersonated user for permission / identity checks
+        impersonado_id = payload["impersonado_id"]
+        repository = UserRepository(db)
+        impersonated = await repository.get_authenticated_user(
+            user_id=impersonado_id,
+            tenant_id=tenant_id,
+        )
+        if impersonated is None or not impersonated.is_active:
+            raise credentials_exception
+
+        return impersonated
+
+    # ── Normal authentication flow ─────────────────────────────────
     repository = UserRepository(db)
     user = await repository.get_authenticated_user(user_id=user_id, tenant_id=tenant_id)
 
@@ -56,6 +86,3 @@ async def get_current_user(
         raise credentials_exception
 
     return user
-
-
-"""RESERVADO para C-04: get_tenant y require_permission."""
