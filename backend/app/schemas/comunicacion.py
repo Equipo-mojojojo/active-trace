@@ -1,72 +1,64 @@
 from __future__ import annotations
 
-from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
-
-from app.models.enums import EstadoComunicacion
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class ComunicacionDestinatarioDTO(BaseModel):
+class ComunicacionPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    email: str
-    variables: dict[str, str] = {}
-
-
-class ComunicacionPreviewRequestDTO(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    asunto: str
-    cuerpo: str
-    variables: dict[str, str] = {}
-
-
-class ComunicacionPreviewResponseDTO(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    asunto_renderizado: str
-    cuerpo_renderizado: str
-    preview_token: str
-
-
-class ComunicacionEnviarRequestDTO(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    asunto: str
-    cuerpo: str
-    destinatarios: list[ComunicacionDestinatarioDTO]
     materia_id: UUID
-    preview_token: str | None = None
+    entrada_padron_ids: list[UUID] = Field(min_length=1)
+    asunto_template: str = Field(min_length=1, max_length=255)
+    cuerpo_template: str = Field(min_length=1)
 
 
-class ComunicacionEnviarResponseDTO(BaseModel):
+class ComunicacionPreviewItemResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    lote_id: UUID
-    count: int
+    entrada_padron_id: UUID
+    destinatario_nombre: str
+    destinatario_email: str
+    asunto: str
+    cuerpo: str
 
 
-class ComunicacionResponseDTO(BaseModel):
-    model_config = ConfigDict(extra="forbid", from_attributes=True)
+class ComunicacionPreviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    requiere_aprobacion: bool
+    preview: list[ComunicacionPreviewItemResponse]
+
+
+class ComunicacionEnqueueRequest(ComunicacionPreviewRequest):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ComunicacionEstadoResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
     id: UUID
-    tenant_id: UUID
-    enviado_por: UUID
-    materia_id: UUID
-    asunto: str
-    estado: EstadoComunicacion
-    lote_id: UUID | None
-    enviado_at: datetime | None
-    aprobado_por: UUID | None
-    reintento_count: int
-    created_at: datetime
+    lote_id: UUID
+    entrada_padron_id: UUID
+    destinatario_nombre: str
+    estado: str
+    requiere_aprobacion: bool
+    aprobada: bool
+    error_detalle: str | None = None
 
 
-class LoteResponseDTO(BaseModel):
+class ComunicacionLoteResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     lote_id: UUID
-    mensajes: list[ComunicacionResponseDTO]
-    count: int
+    total: int
+    requiere_aprobacion: bool
+    comunicaciones: list[ComunicacionEstadoResponse]
+
+
+class ComunicacionActionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    message: str
+    affected: int

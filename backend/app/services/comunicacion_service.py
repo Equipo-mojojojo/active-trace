@@ -1,262 +1,371 @@
-"""ComunicacionService — C-12 comunicaciones-cola-worker.
-
-Handles preview, template rendering, enqueueing, approval, rejection, and
-cancellation of outgoing communications.
-"""
-
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
-import json
-import re
-import time
+from string import Formatter
 from uuid import UUID, uuid4
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit_constants import AuditAction
-from app.core.config import get_settings
-from app.models.comunicacion import Comunicacion
-from app.models.enums import EstadoComunicacion
+from app.models.comunicacion import Comunicacion, EstadoComunicacion
+from app.models.tenant import Tenant
+from app.repositories.asignacion_repository import AsignacionRepository
 from app.repositories.comunicacion_repository import ComunicacionRepository
-from app.schemas.comunicacion import (
-    ComunicacionDestinatarioDTO,
-    ComunicacionEnviarRequestDTO,
-    ComunicacionEnviarResponseDTO,
-    ComunicacionPreviewRequestDTO,
-    ComunicacionPreviewResponseDTO,
-    ComunicacionResponseDTO,
-    LoteResponseDTO,
-)
+from app.repositories.materia_repository import MateriaRepository
 from app.services.audit_service import AuditService
+from app.services.comunicacion_dispatcher import (
+    ComunicacionDispatchError,
+    ComunicacionDispatcher,
+)
 
-KNOWN_VARIABLES = {"nombre_alumno", "materia", "docente"}
-_PREVIEW_TTL_SECONDS = 600  # 10 minutes
-_VAR_PATTERN = re.compile(r"\{(\w+)\}")
 
-
-class VariableDesconocidaError(ValueError):
+class ComunicacionForbiddenError(PermissionError):
     pass
 
 
-class PreviewRequiredError(ValueError):
+class ComunicacionNotFoundError(LookupError):
     pass
 
 
-class PreviewExpiredError(ValueError):
+class ComunicacionConflictError(RuntimeError):
     pass
 
 
-class ComunicacionNotFoundError(Exception):
-    pass
+def _placeholder_names(template: str) -> set[str]:
+    formatter = Formatter()
+    return {
+        field_name for _, field_name, _, _ in formatter.parse(template) if field_name
+    }
+
+
+def render_template(template: str, context: dict[str, str]) -> str:
+    missing = sorted(_placeholder_names(template) - set(context))
+    if missing:
+        raise ComunicacionConflictError(
+            f"Template references unknown variables: {', '.join(missing)}"
+        )
+    return template.format(**context)
 
 
 class ComunicacionService:
     def __init__(
         self,
         session: AsyncSession,
-        ip: str | None = None,
-        user_agent: str | None = None,
-    ) -> None:
+        tenant_id: UUID | str,
+        audit: AuditService | None = None,
+        dispatcher: ComunicacionDispatcher | None = None,
+    ):
         self.session = session
-        self._ip = ip
-        self._user_agent = user_agent
+        self.tenant_id = UUID(str(tenant_id))
+        self.audit = audit
+        self.dispatcher = dispatcher or ComunicacionDispatcher()
+        self.repo = ComunicacionRepository(session, tenant_id)
+        self.asignacion_repo = AsignacionRepository(session, tenant_id)
+        self.materia_repo = MateriaRepository(session, tenant_id)
 
-    # ── Template rendering ───────────────────────────────────────────
-
-    def _render_template(self, template: str, variables: dict[str, str]) -> str:
-        unknown = {m for m in _VAR_PATTERN.findall(template)} - KNOWN_VARIABLES
-        if unknown:
-            raise VariableDesconocidaError(
-                f"Variable(s) desconocida(s): {', '.join(sorted(unknown))}"
+    async def _get_tenant(self) -> Tenant:
+        result = await self.session.execute(
+            select(Tenant).where(
+                Tenant.id == self.tenant_id, Tenant.deleted_at.is_(None)
             )
-        return template.format_map(variables)
+        )
+        tenant = result.scalar_one_or_none()
+        if tenant is None:
+            raise ComunicacionNotFoundError("Tenant no encontrado")
+        return tenant
 
-    # ── Preview token ────────────────────────────────────────────────
+    async def _assert_actor_scope(self, actor: object, materia_id: UUID) -> None:
+        actor_roles = set(getattr(actor, "roles", []))
+        if actor_roles & {"ADMIN", "COORDINADOR", "NEXO"}:
+            return
 
-    @staticmethod
-    def _template_hash(asunto: str, cuerpo: str) -> str:
-        return hashlib.sha256(f"{asunto}|{cuerpo}".encode()).hexdigest()[:24]
+        if "PROFESOR" not in actor_roles:
+            raise ComunicacionForbiddenError(
+                "El actor autenticado no tiene scope para esta materia"
+            )
 
-    def _generate_preview_token(
+        asignaciones = await self.asignacion_repo.find_vigent_for_user(
+            actor.id, self.tenant_id
+        )
+        if any(asignacion.materia_id == materia_id for asignacion in asignaciones):
+            return
+
+        raise ComunicacionForbiddenError(
+            "PROFESOR solo puede comunicar sobre materias propias"
+        )
+
+    async def _build_preview_items(
         self,
-        asunto: str,
-        cuerpo: str,
         *,
-        issued_at_override: float | None = None,
-    ) -> str:
-        settings = get_settings()
-        secret = settings.SECRET_KEY.get_secret_value().encode()
-        payload = json.dumps(
-            {
-                "th": self._template_hash(asunto, cuerpo),
-                "iat": issued_at_override if issued_at_override is not None else time.time(),
-            }
+        materia_id: UUID,
+        entrada_padron_ids: list[UUID],
+        asunto_template: str,
+        cuerpo_template: str,
+        actor: object,
+    ) -> tuple[bool, list[dict]]:
+        await self._assert_actor_scope(actor, materia_id)
+        tenant = await self._get_tenant()
+        materia = await self.materia_repo.get_by_id(materia_id)
+        if materia is None:
+            raise ComunicacionNotFoundError("Materia no encontrada")
+
+        requested_ids = list(dict.fromkeys(entrada_padron_ids))
+        entries = await self.repo.get_active_entries_for_materia(
+            materia_id, requested_ids
         )
-        sig = hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()
-        raw = json.dumps({"p": payload, "s": sig})
-        return base64.urlsafe_b64encode(raw.encode()).decode()
-
-    def _validate_preview_token(
-        self, token: str | None, asunto: str, cuerpo: str
-    ) -> None:
-        if not token:
-            raise PreviewRequiredError("Se requiere preview previo al envío")
-        try:
-            padded = token + "=" * (-len(token) % 4)
-            raw = base64.urlsafe_b64decode(padded.encode()).decode()
-            data = json.loads(raw)
-            payload_str = data["p"]
-            sig = data["s"]
-        except Exception:
-            raise PreviewRequiredError("Token de preview inválido")
-
-        settings = get_settings()
-        secret = settings.SECRET_KEY.get_secret_value().encode()
-        expected = hmac.new(secret, payload_str.encode(), hashlib.sha256).hexdigest()
-
-        if not hmac.compare_digest(sig, expected):
-            raise PreviewRequiredError("Token de preview inválido")
-
-        payload_data = json.loads(payload_str)
-        if time.time() - payload_data["iat"] > _PREVIEW_TTL_SECONDS:
-            raise PreviewExpiredError("El token de preview expiró")
-
-        if payload_data["th"] != self._template_hash(asunto, cuerpo):
-            raise PreviewRequiredError("El template ha cambiado desde el preview")
-
-    # ── Public API ───────────────────────────────────────────────────
-
-    def preview(self, request: ComunicacionPreviewRequestDTO) -> ComunicacionPreviewResponseDTO:
-        asunto_r = self._render_template(request.asunto, request.variables)
-        cuerpo_r = self._render_template(request.cuerpo, request.variables)
-        token = self._generate_preview_token(request.asunto, request.cuerpo)
-        return ComunicacionPreviewResponseDTO(
-            asunto_renderizado=asunto_r,
-            cuerpo_renderizado=cuerpo_r,
-            preview_token=token,
-        )
-
-    async def encolar_lote(
-        self,
-        request: ComunicacionEnviarRequestDTO,
-        tenant_id: UUID,
-        enviado_por: UUID,
-    ) -> ComunicacionEnviarResponseDTO:
-        self._validate_preview_token(request.preview_token, request.asunto, request.cuerpo)
-
-        repo = ComunicacionRepository(self.session, tenant_id)
-        lote_id = uuid4()
-
-        for dest in request.destinatarios:
-            await repo.crear(
-                tenant_id=tenant_id,
-                enviado_por=enviado_por,
-                materia_id=request.materia_id,
-                destinatario=dest.email,
-                asunto=self._render_template(request.asunto, dest.variables),
-                cuerpo=self._render_template(request.cuerpo, dest.variables),
-                lote_id=lote_id,
+        entry_map = {entry.id: entry for entry in entries}
+        missing_ids = [
+            entry_id for entry_id in requested_ids if entry_id not in entry_map
+        ]
+        if missing_ids:
+            raise ComunicacionNotFoundError(
+                "Algunos destinatarios no pertenecen a un padrón activo de la materia"
             )
 
-        audit = AuditService(self.session, tenant_id, self._ip, self._user_agent)
-        await audit.register(
-            actor_id=enviado_por,
-            accion=AuditAction.COMUNICACION_ENVIAR,
-            filas_afectadas=len(request.destinatarios),
+        preview_items: list[dict] = []
+        for entry_id in requested_ids:
+            entry = entry_map[entry_id]
+            if not entry.email:
+                raise ComunicacionConflictError(
+                    "No se puede comunicar a un destinatario sin email cargado"
+                )
+            context = {
+                "alumno_nombre": entry.nombre,
+                "alumno_apellidos": entry.apellidos,
+                "alumno_nombre_completo": f"{entry.nombre} {entry.apellidos}".strip(),
+                "materia_nombre": materia.nombre,
+                "comision": entry.comision or "",
+                "regional": entry.regional or "",
+            }
+            preview_items.append(
+                {
+                    "entrada_padron_id": entry.id,
+                    "destinatario_nombre": context["alumno_nombre_completo"],
+                    "destinatario_email": entry.email,
+                    "asunto": render_template(asunto_template, context),
+                    "cuerpo": render_template(cuerpo_template, context),
+                }
+            )
+
+        return bool(
+            getattr(tenant, "communication_approval_required", False)
+        ), preview_items
+
+    async def preview(
+        self,
+        *,
+        materia_id: UUID,
+        entrada_padron_ids: list[UUID],
+        asunto_template: str,
+        cuerpo_template: str,
+        actor: object,
+    ) -> dict:
+        requiere_aprobacion, preview_items = await self._build_preview_items(
+            materia_id=materia_id,
+            entrada_padron_ids=entrada_padron_ids,
+            asunto_template=asunto_template,
+            cuerpo_template=cuerpo_template,
+            actor=actor,
+        )
+        return {
+            "requiere_aprobacion": requiere_aprobacion,
+            "preview": preview_items,
+        }
+
+    async def enqueue(
+        self,
+        *,
+        materia_id: UUID,
+        entrada_padron_ids: list[UUID],
+        asunto_template: str,
+        cuerpo_template: str,
+        actor: object,
+        audit_actor_id: UUID,
+    ) -> dict:
+        requiere_aprobacion, preview_items = await self._build_preview_items(
+            materia_id=materia_id,
+            entrada_padron_ids=entrada_padron_ids,
+            asunto_template=asunto_template,
+            cuerpo_template=cuerpo_template,
+            actor=actor,
         )
 
-        await self.session.commit()
-        return ComunicacionEnviarResponseDTO(lote_id=lote_id, count=len(request.destinatarios))
+        lote_id = uuid4()
+        comunicaciones = await self.repo.create_many(
+            [
+                {
+                    "lote_id": lote_id,
+                    "entrada_padron_id": item["entrada_padron_id"],
+                    "materia_id": materia_id,
+                    "destinatario_email": item["destinatario_email"],
+                    "destinatario_nombre": item["destinatario_nombre"],
+                    "asunto": item["asunto"],
+                    "cuerpo": item["cuerpo"],
+                    "estado": EstadoComunicacion.PENDIENTE,
+                    "requiere_aprobacion": requiere_aprobacion,
+                }
+                for item in preview_items
+            ]
+        )
 
-    async def cancelar(
-        self, comunicacion_id: UUID, actor_id: UUID, tenant_id: UUID
-    ) -> None:
-        repo = ComunicacionRepository(self.session, tenant_id)
-        m = await repo.get(comunicacion_id)
-        if m is None:
-            raise ComunicacionNotFoundError(str(comunicacion_id))
-        m.cancelar()
+        if self.audit is not None:
+            await self.audit.register(
+                actor_id=audit_actor_id,
+                accion=AuditAction.COMUNICACION_ENVIAR,
+                materia_id=materia_id,
+                filas_afectadas=len(comunicaciones),
+                detalle={
+                    "lote_id": str(lote_id),
+                    "requiere_aprobacion": requiere_aprobacion,
+                },
+            )
+
+        return self._serialize_lote(lote_id, comunicaciones)
+
+    async def get_lote(self, lote_id: UUID, actor: object) -> dict:
+        comunicaciones = await self.repo.list_by_lote(lote_id)
+        if not comunicaciones:
+            raise ComunicacionNotFoundError("Lote no encontrado")
+        await self._assert_actor_scope(actor, comunicaciones[0].materia_id)
+        return self._serialize_lote(lote_id, comunicaciones)
+
+    async def approve_lote(self, lote_id: UUID, actor_id: UUID, actor: object) -> dict:
+        comunicaciones = await self.repo.list_by_lote(lote_id)
+        if not comunicaciones:
+            raise ComunicacionNotFoundError("Lote no encontrado")
+        await self._assert_actor_scope(actor, comunicaciones[0].materia_id)
+
+        affected = 0
+        for comunicacion in comunicaciones:
+            if (
+                comunicacion.requiere_aprobacion
+                and comunicacion.estado == EstadoComunicacion.PENDIENTE
+                and not comunicacion.aprobada
+            ):
+                comunicacion.aprobar(actor_id)
+                affected += 1
+
+        if affected == 0:
+            raise ComunicacionConflictError(
+                "No hay comunicaciones pendientes de aprobación"
+            )
+
         await self.session.flush()
+        if self.audit is not None:
+            await self.audit.register(
+                actor_id=actor_id,
+                accion=AuditAction.COMUNICACION_APROBAR,
+                materia_id=comunicaciones[0].materia_id,
+                filas_afectadas=affected,
+                detalle={"lote_id": str(lote_id)},
+            )
+        return {"message": "Lote aprobado", "affected": affected}
 
-        audit = AuditService(self.session, tenant_id, self._ip, self._user_agent)
-        await audit.register(actor_id=actor_id, accion=AuditAction.COMUNICACION_CANCELAR)
-        await self.session.commit()
+    async def cancel_lote(self, lote_id: UUID, actor_id: UUID, actor: object) -> dict:
+        comunicaciones = await self.repo.list_by_lote(lote_id)
+        if not comunicaciones:
+            raise ComunicacionNotFoundError("Lote no encontrado")
+        await self._assert_actor_scope(actor, comunicaciones[0].materia_id)
 
-    async def aprobar_lote(
-        self, lote_id: UUID, actor_id: UUID, tenant_id: UUID
-    ) -> LoteResponseDTO:
-        repo = ComunicacionRepository(self.session, tenant_id)
-        count = await repo.aprobar_lote(lote_id, aprobado_por=actor_id)
+        affected = 0
+        for comunicacion in comunicaciones:
+            if comunicacion.estado == EstadoComunicacion.PENDIENTE:
+                comunicacion.cancelar(actor_id)
+                affected += 1
 
-        audit = AuditService(self.session, tenant_id, self._ip, self._user_agent)
-        await audit.register(
-            actor_id=actor_id,
-            accion=AuditAction.COMUNICACION_APROBAR,
-            filas_afectadas=count,
-        )
-        await self.session.commit()
+        if affected == 0:
+            raise ComunicacionConflictError(
+                "No hay comunicaciones pendientes para cancelar"
+            )
 
-        mensajes = await repo.listar_por_lote(lote_id)
-        return LoteResponseDTO(
-            lote_id=lote_id,
-            mensajes=[ComunicacionResponseDTO.model_validate(m) for m in mensajes],
-            count=len(mensajes),
-        )
+        await self.session.flush()
+        if self.audit is not None:
+            await self.audit.register(
+                actor_id=actor_id,
+                accion=AuditAction.COMUNICACION_CANCELAR,
+                materia_id=comunicaciones[0].materia_id,
+                filas_afectadas=affected,
+                detalle={"lote_id": str(lote_id)},
+            )
+        return {"message": "Lote cancelado", "affected": affected}
 
-    async def rechazar_lote(
-        self, lote_id: UUID, actor_id: UUID, tenant_id: UUID
-    ) -> LoteResponseDTO:
-        repo = ComunicacionRepository(self.session, tenant_id)
-        count = await repo.rechazar_lote(lote_id)
+    async def approve_one(
+        self, comunicacion_id: UUID, actor_id: UUID, actor: object
+    ) -> dict:
+        comunicacion = await self.repo.get_by_id(comunicacion_id)
+        if comunicacion is None:
+            raise ComunicacionNotFoundError("Comunicación no encontrada")
+        await self._assert_actor_scope(actor, comunicacion.materia_id)
+        comunicacion.aprobar(actor_id)
+        await self.session.flush()
+        if self.audit is not None:
+            await self.audit.register(
+                actor_id=actor_id,
+                accion=AuditAction.COMUNICACION_APROBAR,
+                materia_id=comunicacion.materia_id,
+                filas_afectadas=1,
+                detalle={"comunicacion_id": str(comunicacion.id)},
+            )
+        return {"message": "Comunicación aprobada", "affected": 1}
 
-        audit = AuditService(self.session, tenant_id, self._ip, self._user_agent)
-        await audit.register(
-            actor_id=actor_id,
-            accion=AuditAction.COMUNICACION_RECHAZAR,
-            filas_afectadas=count,
-        )
-        await self.session.commit()
+    async def cancel_one(
+        self, comunicacion_id: UUID, actor_id: UUID, actor: object
+    ) -> dict:
+        comunicacion = await self.repo.get_by_id(comunicacion_id)
+        if comunicacion is None:
+            raise ComunicacionNotFoundError("Comunicación no encontrada")
+        await self._assert_actor_scope(actor, comunicacion.materia_id)
+        comunicacion.cancelar(actor_id)
+        await self.session.flush()
+        if self.audit is not None:
+            await self.audit.register(
+                actor_id=actor_id,
+                accion=AuditAction.COMUNICACION_CANCELAR,
+                materia_id=comunicacion.materia_id,
+                filas_afectadas=1,
+                detalle={"comunicacion_id": str(comunicacion.id)},
+            )
+        return {"message": "Comunicación cancelada", "affected": 1}
 
-        mensajes = await repo.listar_por_lote(lote_id)
-        return LoteResponseDTO(
-            lote_id=lote_id,
-            mensajes=[ComunicacionResponseDTO.model_validate(m) for m in mensajes],
-            count=len(mensajes),
-        )
+    async def process_pending_batch(self, limit: int = 100) -> int:
+        comunicaciones = await self.repo.get_pending_eligible(limit=limit)
+        processed = 0
 
-    async def aprobar_individual(
-        self, comunicacion_id: UUID, actor_id: UUID, tenant_id: UUID
-    ) -> ComunicacionResponseDTO:
-        repo = ComunicacionRepository(self.session, tenant_id)
-        m = await repo.aprobar_individual(comunicacion_id, aprobado_por=actor_id)
-        if m is None:
-            raise ComunicacionNotFoundError(str(comunicacion_id))
+        for comunicacion in comunicaciones:
+            comunicacion.marcar_enviando()
+            await self.session.flush()
+            try:
+                await self.dispatcher.send(comunicacion)
+            except ComunicacionDispatchError as exc:
+                comunicacion.marcar_error(str(exc))
+            except Exception as exc:
+                comunicacion.marcar_error(str(exc))
+            else:
+                comunicacion.marcar_enviada()
+            processed += 1
 
-        audit = AuditService(self.session, tenant_id, self._ip, self._user_agent)
-        await audit.register(
-            actor_id=actor_id,
-            accion=AuditAction.COMUNICACION_APROBAR,
-            filas_afectadas=1,
-        )
-        await self.session.commit()
-        return ComunicacionResponseDTO.model_validate(m)
+        await self.session.flush()
+        return processed
 
-    async def rechazar_individual(
-        self, comunicacion_id: UUID, actor_id: UUID, tenant_id: UUID
-    ) -> ComunicacionResponseDTO:
-        repo = ComunicacionRepository(self.session, tenant_id)
-        m = await repo.rechazar_individual(comunicacion_id)
-        if m is None:
-            raise ComunicacionNotFoundError(str(comunicacion_id))
-
-        audit = AuditService(self.session, tenant_id, self._ip, self._user_agent)
-        await audit.register(
-            actor_id=actor_id,
-            accion=AuditAction.COMUNICACION_RECHAZAR,
-            filas_afectadas=1,
-        )
-        await self.session.commit()
-        return ComunicacionResponseDTO.model_validate(m)
+    def _serialize_lote(
+        self, lote_id: UUID, comunicaciones: list[Comunicacion]
+    ) -> dict:
+        requiere_aprobacion = any(c.requiere_aprobacion for c in comunicaciones)
+        return {
+            "lote_id": lote_id,
+            "total": len(comunicaciones),
+            "requiere_aprobacion": requiere_aprobacion,
+            "comunicaciones": [
+                {
+                    "id": comunicacion.id,
+                    "lote_id": comunicacion.lote_id,
+                    "entrada_padron_id": comunicacion.entrada_padron_id,
+                    "destinatario_nombre": comunicacion.destinatario_nombre,
+                    "estado": comunicacion.estado,
+                    "requiere_aprobacion": comunicacion.requiere_aprobacion,
+                    "aprobada": comunicacion.aprobada,
+                    "error_detalle": comunicacion.error_detalle,
+                }
+                for comunicacion in comunicaciones
+            ],
+        }

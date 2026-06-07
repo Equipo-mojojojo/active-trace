@@ -1,624 +1,704 @@
-"""
-Strict TDD tests for C-12 comunicaciones-cola-worker.
-
-TDD cycle:
-  Group 1: State machine (pure unit, no DB) — model state transitions
-  Group 2: Service preview/template (pure unit, no DB) — template rendering
-  Group 3: Preview token (pure unit, no DB) — HMAC token lifecycle
-  Group 4: Worker unit (pure unit, mocked repo) — loop and retry logic
-  Group 5: Repository integration (requires TEST_DATABASE_URL)
-  Group 6: API tests (requires TEST_DATABASE_URL)
-  Group 7: Security tests (requires TEST_DATABASE_URL)
-
-RED → GREEN → TRIANGULATE → REFACTOR order preserved.
-"""
-
 from __future__ import annotations
 
-import asyncio
-import time
-from datetime import datetime, timezone, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import date
 from uuid import UUID, uuid4
 
 import pytest
-import pytest_asyncio
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.conftest import create_test_tenant, create_test_user, create_test_materia
+from app.core.audit_constants import AuditAction
+from app.core.security import build_email_lookup, hash_password
+from app.models.asignacion import Asignacion, RolEnum
+from app.models.audit_log import AuditLog
+from app.models.comunicacion import Comunicacion, EstadoComunicacion
+from app.models.permission import Permission
+from app.models.role import Role
+from app.models.role_permission import RolePermission
+from app.models.user import User
+from app.models.usuario import Usuario
+from app.repositories.padron_repository import PadronRepository
+from app.services.audit_service import AuditService
+from app.services.comunicacion_dispatcher import (
+    ComunicacionDispatchError,
+    ComunicacionDispatcher,
+)
+from app.services.comunicacion_service import (
+    ComunicacionConflictError,
+    ComunicacionForbiddenError,
+    ComunicacionNotFoundError,
+    ComunicacionService,
+)
+from app.workers.comunicacion_worker import process_pending_communications
+from tests.conftest import create_test_cohorte, create_test_materia, create_test_tenant
 
 
-# ===========================================================================
-# Group 1 — State machine (pure unit, no DB)
-# ===========================================================================
-# RED: import fails until models/comunicacion.py and models/enums.py exist.
+async def _grant_permissions(
+    db_session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    role_name: str,
+    permissions: list[str],
+) -> None:
+    role = Role(tenant_id=tenant_id, nombre=role_name, editable=True)
+    db_session.add(role)
+    await db_session.flush()
 
+    modulo_accion = {
+        "comunicacion:enviar": ("comunicacion", "enviar"),
+        "comunicacion:enviar:propio": ("comunicacion", "enviar"),
+        "comunicacion:aprobar": ("comunicacion", "aprobar"),
+    }
 
-class TestEstadoComunicacion:
-    """Unit tests for Comunicacion state machine (D1)."""
-
-    def setup_method(self):
-        from app.models.comunicacion import Comunicacion, InvalidStateTransitionError
-        from app.models.enums import EstadoComunicacion
-
-        self.Comunicacion = Comunicacion
-        self.StateError = InvalidStateTransitionError
-        self.Estado = EstadoComunicacion
-
-    def _make(self, estado=None):
-        """Instantiate Comunicacion in-memory without DB session."""
-        from uuid import uuid4
-
-        c = self.Comunicacion(
-            tenant_id=uuid4(),
-            enviado_por=uuid4(),
-            materia_id=uuid4(),
-            destinatario="test@example.com",
-            asunto="test",
-            cuerpo="test",
+    for codigo in permissions:
+        modulo, accion = modulo_accion[codigo]
+        permiso = Permission(
+            tenant_id=tenant_id,
+            codigo=codigo,
+            modulo=modulo,
+            accion=accion,
         )
-        if estado is not None:
-            c.estado = estado
-        return c
-
-    # ── Valid transitions ────────────────────────────────────────────
-
-    def test_pendiente_to_enviando_valid(self):
-        c = self._make(self.Estado.PENDIENTE)
-        c.marcar_enviando()
-        assert c.estado == self.Estado.ENVIANDO
-
-    def test_enviando_to_enviado_valid(self):
-        c = self._make(self.Estado.ENVIANDO)
-        c.marcar_enviado()
-        assert c.estado == self.Estado.ENVIADO
-
-    def test_enviando_to_error_valid(self):
-        c = self._make(self.Estado.ENVIANDO)
-        c.marcar_error()
-        assert c.estado == self.Estado.ERROR
-
-    def test_pendiente_to_cancelado_valid(self):
-        c = self._make(self.Estado.PENDIENTE)
-        c.cancelar()
-        assert c.estado == self.Estado.CANCELADO
-
-    # ── Invalid transitions (triangulate) ───────────────────────────
-
-    def test_enviado_to_enviando_invalid(self):
-        c = self._make(self.Estado.ENVIADO)
-        with pytest.raises(self.StateError):
-            c.marcar_enviando()
-
-    def test_cancelado_to_enviando_invalid(self):
-        c = self._make(self.Estado.CANCELADO)
-        with pytest.raises(self.StateError):
-            c.marcar_enviando()
-
-    def test_error_to_enviando_invalid(self):
-        c = self._make(self.Estado.ERROR)
-        with pytest.raises(self.StateError):
-            c.marcar_enviando()
-
-    def test_enviando_to_cancelado_invalid(self):
-        """cancelar() only valid from PENDIENTE."""
-        c = self._make(self.Estado.ENVIANDO)
-        with pytest.raises(self.StateError):
-            c.cancelar()
-
-    def test_enviado_to_cancelado_invalid(self):
-        c = self._make(self.Estado.ENVIADO)
-        with pytest.raises(self.StateError):
-            c.cancelar()
-
-    # ── Spec: marcar_enviado registra enviado_at ─────────────────────
-
-    def test_marcar_enviado_sets_enviado_at(self):
-        c = self._make(self.Estado.ENVIANDO)
-        before = datetime.now(timezone.utc)
-        c.marcar_enviado()
-        assert c.enviado_at is not None
-        assert c.enviado_at >= before
-
-    def test_marcar_enviado_from_pendiente_invalid(self):
-        c = self._make(self.Estado.PENDIENTE)
-        with pytest.raises(self.StateError):
-            c.marcar_enviado()
-
-    def test_marcar_error_from_pendiente_invalid(self):
-        c = self._make(self.Estado.PENDIENTE)
-        with pytest.raises(self.StateError):
-            c.marcar_error()
-
-
-# ===========================================================================
-# Group 2 — Service preview / template rendering (pure unit, no DB)
-# ===========================================================================
-# RED: import fails until services/comunicacion_service.py exists.
-
-
-class TestTemplateRendering:
-    """Unit tests for _render_template() — D5."""
-
-    def setup_method(self):
-        from app.services.comunicacion_service import (
-            ComunicacionService,
-            VariableDesconocidaError,
-        )
-
-        self.service = ComunicacionService.__new__(ComunicacionService)
-        self.VariableError = VariableDesconocidaError
-
-    def test_render_single_variable(self):
-        result = self.service._render_template(
-            "Hola {nombre_alumno}", {"nombre_alumno": "Ana García"}
-        )
-        assert result == "Hola Ana García"
-
-    def test_render_multiple_variables(self):
-        result = self.service._render_template(
-            "{nombre_alumno} cursa {materia} con {docente}",
-            {"nombre_alumno": "Ana", "materia": "Matemática", "docente": "Prof. López"},
-        )
-        assert result == "Ana cursa Matemática con Prof. López"
-
-    def test_unknown_variable_raises(self):
-        with pytest.raises(self.VariableError, match="variable_inexistente"):
-            self.service._render_template(
-                "Hola {variable_inexistente}", {"nombre_alumno": "Ana"}
+        db_session.add(permiso)
+        await db_session.flush()
+        db_session.add(
+            RolePermission(
+                tenant_id=tenant_id,
+                rol_id=role.id,
+                permiso_id=permiso.id,
             )
-
-    def test_empty_template_returns_empty(self):
-        result = self.service._render_template("", {})
-        assert result == ""
-
-    def test_template_without_variables_unchanged(self):
-        result = self.service._render_template("Mensaje sin variables", {})
-        assert result == "Mensaje sin variables"
-
-
-# ===========================================================================
-# Group 3 — Preview token lifecycle (pure unit, no DB)
-# ===========================================================================
-
-
-class TestPreviewToken:
-    """Unit tests for _generate_preview_token / _validate_preview_token."""
-
-    def setup_method(self):
-        import os
-
-        os.environ.setdefault(
-            "SECRET_KEY", "test-secret-key-with-at-least-32-characters"
-        )
-        os.environ.setdefault(
-            "DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test"
-        )
-        os.environ.setdefault("ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
-        os.environ.setdefault("ACCESS_TOKEN_EXPIRE_MINUTES", "15")
-        os.environ.setdefault("REFRESH_TOKEN_EXPIRE_MINUTES", "10080")
-        os.environ.setdefault("PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "30")
-        os.environ.setdefault("TWO_FACTOR_CHALLENGE_EXPIRE_MINUTES", "5")
-        os.environ.setdefault("TOTP_ISSUER", "test")
-        os.environ.setdefault("LOGIN_RATE_LIMIT_MAX_ATTEMPTS", "5")
-        os.environ.setdefault("LOGIN_RATE_LIMIT_WINDOW_SECONDS", "60")
-        os.environ.setdefault("OTEL_ENABLED", "false")
-
-        from app.core.config import get_settings
-
-        get_settings.cache_clear()
-
-        from app.services.comunicacion_service import (
-            ComunicacionService,
-            PreviewExpiredError,
-            PreviewRequiredError,
         )
 
-        self.service = ComunicacionService.__new__(ComunicacionService)
-        self.PreviewExpiredError = PreviewExpiredError
-        self.PreviewRequiredError = PreviewRequiredError
 
-    def test_valid_token_validates_without_error(self):
-        token = self.service._generate_preview_token("asunto", "cuerpo")
-        self.service._validate_preview_token(token, "asunto", "cuerpo")
+async def _create_auth_user(
+    db_session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    role_name: str,
+    email: str,
+    user_id: UUID | None = None,
+) -> User:
+    user = User(
+        id=user_id or uuid4(),
+        tenant_id=tenant_id,
+        email=email,
+        email_lookup=build_email_lookup(email),
+        full_name=f"{role_name.title()} Test",
+        password_hash=hash_password("Password123!"),
+        roles=[role_name],
+    )
+    db_session.add(user)
+    await db_session.flush()
+    return user
 
-    def test_none_token_raises_required_error(self):
-        with pytest.raises(self.PreviewRequiredError):
-            self.service._validate_preview_token(None, "asunto", "cuerpo")
 
-    def test_expired_token_raises_expired_error(self):
-        token = self.service._generate_preview_token(
-            "asunto", "cuerpo", issued_at_override=time.time() - 700
+async def _create_profesor_actor_with_scope(
+    db_session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    materia_id: UUID,
+    email: str = "profesor@test.com",
+) -> User:
+    shared_id = uuid4()
+    await _grant_permissions(
+        db_session,
+        tenant_id=tenant_id,
+        role_name="PROFESOR",
+        permissions=["comunicacion:enviar:propio"],
+    )
+    user = await _create_auth_user(
+        db_session,
+        tenant_id=tenant_id,
+        role_name="PROFESOR",
+        email=email,
+        user_id=shared_id,
+    )
+    usuario = Usuario(
+        tenant_id=tenant_id,
+        nombre="Profesor",
+        apellidos="Scope",
+        email=email,
+    )
+    usuario.id = shared_id
+    db_session.add(usuario)
+    await db_session.flush()
+    db_session.add(
+        Asignacion(
+            tenant_id=tenant_id,
+            usuario_id=shared_id,
+            rol=RolEnum.PROFESOR,
+            materia_id=materia_id,
+            carrera_id=None,
+            cohorte_id=None,
+            comisiones="A1",
+            desde=date.today(),
+            hasta=None,
+            responsable_id=None,
         )
-        with pytest.raises(self.PreviewExpiredError):
-            self.service._validate_preview_token(token, "asunto", "cuerpo")
-
-    def test_changed_asunto_raises_required_error(self):
-        token = self.service._generate_preview_token("asunto original", "cuerpo")
-        with pytest.raises(self.PreviewRequiredError):
-            self.service._validate_preview_token(token, "asunto modificado", "cuerpo")
-
-    def test_changed_cuerpo_raises_required_error(self):
-        token = self.service._generate_preview_token("asunto", "cuerpo original")
-        with pytest.raises(self.PreviewRequiredError):
-            self.service._validate_preview_token(token, "asunto", "cuerpo modificado")
-
-    def test_tampered_token_raises_required_error(self):
-        with pytest.raises(self.PreviewRequiredError):
-            self.service._validate_preview_token("token-invalido", "asunto", "cuerpo")
+    )
+    await db_session.flush()
+    return user
 
 
-# ===========================================================================
-# Group 4 — Worker unit (pure unit, mocked repo)
-# ===========================================================================
+async def _create_coordinador_actor(
+    db_session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    email: str,
+) -> User:
+    await _grant_permissions(
+        db_session,
+        tenant_id=tenant_id,
+        role_name="COORDINADOR",
+        permissions=["comunicacion:enviar", "comunicacion:aprobar"],
+    )
+    return await _create_auth_user(
+        db_session,
+        tenant_id=tenant_id,
+        role_name="COORDINADOR",
+        email=email,
+    )
 
 
-class TestComunicacionWorkerUnit:
-    """Unit tests for worker logic — mocked DB session."""
-
-    def setup_method(self):
-        from app.models.comunicacion import Comunicacion, InvalidStateTransitionError
-        from app.models.enums import EstadoComunicacion
-        from app.workers.comunicacion_worker import ComunicacionWorker
-
-        self.Comunicacion = Comunicacion
-        self.Estado = EstadoComunicacion
-        self.Worker = ComunicacionWorker
-        self.StateError = InvalidStateTransitionError
-
-    def _make_comunicacion(self, estado=None):
-        c = self.Comunicacion(
-            tenant_id=uuid4(),
-            enviado_por=uuid4(),
-            materia_id=uuid4(),
-            destinatario="test@example.com",
-            asunto="test",
-            cuerpo="test",
-            reintento_count=0,
-        )
-        if estado is not None:
-            c.estado = estado
-        return c
-
-    @pytest.mark.asyncio
-    async def test_process_pendiente_to_enviado(self):
-        worker = self.Worker.__new__(self.Worker)
-        worker._max_retries = 3
-
-        c = self._make_comunicacion(self.Estado.PENDIENTE)
-        c.marcar_enviando()
-
-        send_called = []
-
-        async def mock_send(com):
-            send_called.append(com.id)
-
-        worker._enviar_mock = mock_send
-        await worker._attempt_send(c, mock_send)
-
-        assert c.estado == self.Estado.ENVIADO
-        assert len(send_called) == 1
-
-    @pytest.mark.asyncio
-    async def test_process_fail_marks_error(self):
-        worker = self.Worker.__new__(self.Worker)
-        worker._max_retries = 1
-
-        c = self._make_comunicacion(self.Estado.ENVIANDO)
-
-        async def failing_send(com):
-            raise RuntimeError("send failed")
-
-        await worker._attempt_send(c, failing_send)
-
-        assert c.estado == self.Estado.ERROR
-        assert c.reintento_count == 1
-
-    @pytest.mark.asyncio
-    async def test_retry_success_on_second_attempt(self):
-        worker = self.Worker.__new__(self.Worker)
-        worker._max_retries = 3
-
-        c = self._make_comunicacion(self.Estado.ENVIANDO)
-        attempts = []
-
-        async def flaky_send(com):
-            attempts.append(1)
-            if len(attempts) == 1:
-                raise RuntimeError("first attempt failed")
-
-        await worker._attempt_send(c, flaky_send, base_delay=0)
-
-        assert c.estado == self.Estado.ENVIADO
-        assert c.reintento_count == 1
-
-    @pytest.mark.asyncio
-    async def test_exhausted_retries_marks_error(self):
-        worker = self.Worker.__new__(self.Worker)
-        worker._max_retries = 3
-
-        c = self._make_comunicacion(self.Estado.ENVIANDO)
-
-        async def always_fail(com):
-            raise RuntimeError("always fails")
-
-        await worker._attempt_send(c, always_fail, base_delay=0)
-
-        assert c.estado == self.Estado.ERROR
-        assert c.reintento_count == 3
+async def _create_user_without_permissions(
+    db_session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    email: str,
+) -> User:
+    return await _create_auth_user(
+        db_session,
+        tenant_id=tenant_id,
+        role_name="SIN_PERMISOS",
+        email=email,
+    )
 
 
-# ===========================================================================
-# Group 5 — Repository integration (requires TEST_DATABASE_URL)
-# ===========================================================================
+async def _create_padron_entries(
+    db_session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    materia_id: UUID,
+    cohorte_id: UUID,
+    rows: list[dict[str, str]],
+) -> list:
+    repo = PadronRepository(db_session, tenant_id)
+    version = await repo.crear_version(materia_id, cohorte_id)
+    await repo.crear_entradas_bulk(version.id, rows)
+    await repo.actualizar_total_entradas(version.id, len(rows))
+    return await repo.listar_entradas(version.id)
+
+
+def _login_headers(client, *, email: str) -> dict[str, str]:
+    response = client.post(
+        "/api/auth/login",
+        json={"email": email, "password": "Password123!"},
+    )
+    assert response.status_code == 200
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+class FailingDispatcher(ComunicacionDispatcher):
+    async def send(self, comunicacion: Comunicacion):
+        raise ComunicacionDispatchError(f"fallo-{comunicacion.id}")
 
 
 @pytest.mark.asyncio
-class TestComunicacionRepository:
-    """Integration tests for ComunicacionRepository."""
+async def test_model_transitions_validate_state_machine() -> None:
+    comunicacion = Comunicacion(
+        tenant_id=uuid4(),
+        lote_id=uuid4(),
+        entrada_padron_id=uuid4(),
+        materia_id=uuid4(),
+        destinatario_email="alumno@test.com",
+        destinatario_nombre="Alumno Test",
+        asunto="Hola",
+        cuerpo="Cuerpo",
+        estado=EstadoComunicacion.PENDIENTE,
+        requiere_aprobacion=True,
+    )
 
-    async def test_crear_encrypts_destinatario(
-        self, db_session, test_tenant, test_materia
-    ):
-        """destinatario column must contain ciphertext, not plain email."""
-        from sqlalchemy import text
+    comunicacion.aprobar(uuid4())
+    assert comunicacion.aprobada is True
+    comunicacion.marcar_enviando()
+    assert comunicacion.estado == EstadoComunicacion.ENVIANDO
+    comunicacion.marcar_enviada()
+    assert comunicacion.estado == EstadoComunicacion.ENVIADO
 
-        from app.models.usuario import Usuario
-        from app.repositories.comunicacion_repository import ComunicacionRepository
+    with pytest.raises(ValueError):
+        comunicacion.cancelar(uuid4())
 
-        usuario = Usuario(
-            tenant_id=test_tenant.id,
-            nombre="Remit",
-            apellidos="Ente",
-            email="remitente@test.com",
+
+@pytest.mark.asyncio
+async def test_destinatario_email_is_stored_encrypted(db_session: AsyncSession) -> None:
+    tenant = await create_test_tenant(db_session, slug="c12-encrypted")
+    materia = await create_test_materia(
+        db_session, tenant_id=tenant.id, codigo="C12-ENC"
+    )
+    cohorte = await create_test_cohorte(
+        db_session, tenant_id=tenant.id, nombre="C12-ENC"
+    )
+    entradas = await _create_padron_entries(
+        db_session,
+        tenant_id=tenant.id,
+        materia_id=materia.id,
+        cohorte_id=cohorte.id,
+        rows=[
+            {
+                "nombre": "Alumno",
+                "apellidos": "Test",
+                "email": "alumno@test.com",
+                "comision": "A1",
+                "regional": "Centro",
+            }
+        ],
+    )
+    comunicacion = Comunicacion(
+        tenant_id=tenant.id,
+        lote_id=uuid4(),
+        entrada_padron_id=entradas[0].id,
+        materia_id=materia.id,
+        destinatario_email="alumno@test.com",
+        destinatario_nombre="Alumno Test",
+        asunto="Asunto",
+        cuerpo="Cuerpo",
+    )
+    db_session.add(comunicacion)
+    await db_session.commit()
+
+    raw_value = (
+        await db_session.execute(
+            text("SELECT destinatario_email FROM comunicacion WHERE id = :id"),
+            {"id": str(comunicacion.id)},
         )
-        db_session.add(usuario)
-        await db_session.flush()
+    ).scalar_one()
 
-        repo = ComunicacionRepository(db_session, test_tenant.id)
-        com = await repo.crear(
-            tenant_id=test_tenant.id,
-            enviado_por=usuario.id,
-            materia_id=test_materia.id,
-            destinatario="alumno@test.com",
-            asunto="Test encrypt",
-            cuerpo="Cuerpo",
+    assert raw_value != "alumno@test.com"
+
+
+@pytest.mark.asyncio
+async def test_preview_returns_rendered_messages_without_persisting(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await create_test_tenant(db_session, slug="c12-preview")
+    materia = await create_test_materia(
+        db_session, tenant_id=tenant.id, codigo="C12-PRE"
+    )
+    cohorte = await create_test_cohorte(
+        db_session, tenant_id=tenant.id, nombre="C12-PRE"
+    )
+    actor = await _create_coordinador_actor(
+        db_session, tenant_id=tenant.id, email="coord-preview@test.com"
+    )
+    entries = await _create_padron_entries(
+        db_session,
+        tenant_id=tenant.id,
+        materia_id=materia.id,
+        cohorte_id=cohorte.id,
+        rows=[
+            {
+                "nombre": "Ana",
+                "apellidos": "Lopez",
+                "email": "ana@test.com",
+                "comision": "A1",
+                "regional": "Centro",
+            },
+            {
+                "nombre": "Beto",
+                "apellidos": "Ruiz",
+                "email": "beto@test.com",
+                "comision": "A1",
+                "regional": "Centro",
+            },
+        ],
+    )
+    await db_session.commit()
+
+    service = ComunicacionService(db_session, tenant.id)
+    preview = await service.preview(
+        materia_id=materia.id,
+        entrada_padron_ids=[entry.id for entry in entries],
+        asunto_template="Recordatorio {materia_nombre}",
+        cuerpo_template="Hola {alumno_nombre_completo}",
+        actor=actor,
+    )
+
+    assert preview["requiere_aprobacion"] is False
+    assert len(preview["preview"]) == 2
+    assert preview["preview"][0]["asunto"] == f"Recordatorio {materia.nombre}"
+    count = await db_session.execute(select(Comunicacion))
+    assert count.scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_profesor_scope_blocks_other_materia(db_session: AsyncSession) -> None:
+    tenant = await create_test_tenant(db_session, slug="c12-scope")
+    materia_ok = await create_test_materia(
+        db_session, tenant_id=tenant.id, codigo="C12-OK"
+    )
+    materia_other = await create_test_materia(
+        db_session, tenant_id=tenant.id, codigo="C12-OTR"
+    )
+    cohorte = await create_test_cohorte(
+        db_session, tenant_id=tenant.id, nombre="C12-SCOPE"
+    )
+    actor = await _create_profesor_actor_with_scope(
+        db_session,
+        tenant_id=tenant.id,
+        materia_id=materia_ok.id,
+    )
+    entries = await _create_padron_entries(
+        db_session,
+        tenant_id=tenant.id,
+        materia_id=materia_other.id,
+        cohorte_id=cohorte.id,
+        rows=[
+            {
+                "nombre": "Ana",
+                "apellidos": "Lopez",
+                "email": "ana@test.com",
+                "comision": "A1",
+                "regional": "Centro",
+            },
+        ],
+    )
+    await db_session.commit()
+
+    service = ComunicacionService(db_session, tenant.id)
+    with pytest.raises(ComunicacionForbiddenError):
+        await service.preview(
+            materia_id=materia_other.id,
+            entrada_padron_ids=[entries[0].id],
+            asunto_template="Hola {alumno_nombre}",
+            cuerpo_template="Mensaje",
+            actor=actor,
         )
-        await db_session.flush()
-
-        row = (
-            await db_session.execute(
-                text("SELECT destinatario FROM comunicacion WHERE id = :id"),
-                {"id": str(com.id)},
-            )
-        ).fetchone()
-        assert row is not None
-        assert row[0] != "alumno@test.com"
-        assert len(row[0]) > 20
-
-    async def test_listar_por_lote_returns_only_matching(
-        self, db_session, test_tenant, test_materia
-    ):
-        from app.models.usuario import Usuario
-        from app.repositories.comunicacion_repository import ComunicacionRepository
-
-        usuario = Usuario(
-            tenant_id=test_tenant.id,
-            nombre="Doc",
-            apellidos="Lote",
-            email="doclote@test.com",
-        )
-        db_session.add(usuario)
-        await db_session.flush()
-
-        repo = ComunicacionRepository(db_session, test_tenant.id)
-        lote_id = uuid4()
-
-        for i in range(3):
-            await repo.crear(
-                tenant_id=test_tenant.id,
-                enviado_por=usuario.id,
-                materia_id=test_materia.id,
-                destinatario=f"a{i}@test.com",
-                asunto="Lote test",
-                cuerpo="Body",
-                lote_id=lote_id,
-            )
-        # One message with a different lote
-        await repo.crear(
-            tenant_id=test_tenant.id,
-            enviado_por=usuario.id,
-            materia_id=test_materia.id,
-            destinatario="other@test.com",
-            asunto="Other",
-            cuerpo="Body",
-            lote_id=uuid4(),
-        )
-        await db_session.flush()
-
-        items = await repo.listar_por_lote(lote_id)
-        assert len(items) == 3
-
-    async def test_tenant_isolation_repo(
-        self, db_session, test_materia
-    ):
-        """Repo for tenant B sees zero messages created by tenant A."""
-        from app.models.materia import Materia
-        from app.models.usuario import Usuario
-        from app.repositories.comunicacion_repository import ComunicacionRepository
-
-        tenant_a = await create_test_tenant(db_session, slug="ta-c12", name="C12 A")
-        await db_session.commit()
-        tenant_b = await create_test_tenant(db_session, slug="tb-c12", name="C12 B")
-        await db_session.commit()
-
-        ua = Usuario(
-            tenant_id=tenant_a.id, nombre="A", apellidos="User", email="ua-c12@test.com"
-        )
-        db_session.add(ua)
-        await db_session.flush()
-
-        mat_a = Materia(
-            tenant_id=tenant_a.id, codigo="MAT-C12A", nombre="Materia C12 A"
-        )
-        db_session.add(mat_a)
-        await db_session.flush()
-
-        repo_a = ComunicacionRepository(db_session, tenant_a.id)
-        await repo_a.crear(
-            tenant_id=tenant_a.id,
-            enviado_por=ua.id,
-            materia_id=mat_a.id,
-            destinatario="dest@test.com",
-            asunto="Isolation test",
-            cuerpo="Body",
-        )
-        await db_session.flush()
-
-        repo_b = ComunicacionRepository(db_session, tenant_b.id)
-        items_b = await repo_b.listar_por_estado_pendiente()
-        assert len(items_b) == 0
-
-    async def test_aprobar_lote_sets_aprobado_por(
-        self, db_session, test_tenant, test_materia
-    ):
-        from app.models.usuario import Usuario
-        from app.repositories.comunicacion_repository import ComunicacionRepository
-
-        usuario = Usuario(
-            tenant_id=test_tenant.id,
-            nombre="Aprob",
-            apellidos="Ador",
-            email="aprobador@test.com",
-        )
-        db_session.add(usuario)
-        await db_session.flush()
-
-        repo = ComunicacionRepository(db_session, test_tenant.id)
-        lote_id = uuid4()
-        for _ in range(2):
-            await repo.crear(
-                tenant_id=test_tenant.id,
-                enviado_por=usuario.id,
-                materia_id=test_materia.id,
-                destinatario="a@test.com",
-                asunto="Aprobacion",
-                cuerpo="Body",
-                lote_id=lote_id,
-            )
-        await db_session.flush()
-
-        count = await repo.aprobar_lote(lote_id, aprobado_por=usuario.id)
-        await db_session.flush()
-
-        assert count == 2
-        items = await repo.listar_por_lote(lote_id)
-        for item in items:
-            assert item.aprobado_por == usuario.id
 
 
-# ===========================================================================
-# Group 6 — API tests (requires TEST_DATABASE_URL)
-# ===========================================================================
+@pytest.mark.asyncio
+async def test_enqueue_and_actions_register_audit_entries(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await create_test_tenant(db_session, slug="c12-audit")
+    tenant.communication_approval_required = True
+    materia = await create_test_materia(
+        db_session, tenant_id=tenant.id, codigo="C12-AUD"
+    )
+    cohorte = await create_test_cohorte(
+        db_session, tenant_id=tenant.id, nombre="C12-AUD"
+    )
+    actor = await _create_coordinador_actor(
+        db_session, tenant_id=tenant.id, email="coord-audit@test.com"
+    )
+    entries = await _create_padron_entries(
+        db_session,
+        tenant_id=tenant.id,
+        materia_id=materia.id,
+        cohorte_id=cohorte.id,
+        rows=[
+            {
+                "nombre": "Ana",
+                "apellidos": "Lopez",
+                "email": "ana@test.com",
+                "comision": "A1",
+                "regional": "Centro",
+            },
+        ],
+    )
+    audit = AuditService(db_session, tenant.id)
+    service = ComunicacionService(db_session, tenant.id, audit=audit)
+
+    lote = await service.enqueue(
+        materia_id=materia.id,
+        entrada_padron_ids=[entries[0].id],
+        asunto_template="Hola {alumno_nombre}",
+        cuerpo_template="Seguimiento {materia_nombre}",
+        actor=actor,
+        audit_actor_id=actor.id,
+    )
+    comunicacion_id = lote["comunicaciones"][0]["id"]
+    await service.approve_lote(lote["lote_id"], actor.id, actor)
+    await service.cancel_one(comunicacion_id, actor.id, actor)
+    await db_session.commit()
+
+    result = await db_session.execute(
+        select(AuditLog.accion).order_by(AuditLog.fecha_hora)
+    )
+    acciones = result.scalars().all()
+    assert AuditAction.COMUNICACION_ENVIAR in acciones
+    assert AuditAction.COMUNICACION_APROBAR in acciones
+    assert AuditAction.COMUNICACION_CANCELAR in acciones
 
 
-def test_preview_sin_auth_retorna_401(client):
-    """Preview endpoint rejects unauthenticated requests."""
-    resp = client.post(
+@pytest.mark.asyncio
+async def test_worker_respects_approval_and_success_path(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await create_test_tenant(db_session, slug="c12-worker")
+    tenant.communication_approval_required = True
+    materia = await create_test_materia(
+        db_session, tenant_id=tenant.id, codigo="C12-WRK"
+    )
+    cohorte = await create_test_cohorte(
+        db_session, tenant_id=tenant.id, nombre="C12-WRK"
+    )
+    actor = await _create_coordinador_actor(
+        db_session, tenant_id=tenant.id, email="coord-worker@test.com"
+    )
+    entries = await _create_padron_entries(
+        db_session,
+        tenant_id=tenant.id,
+        materia_id=materia.id,
+        cohorte_id=cohorte.id,
+        rows=[
+            {
+                "nombre": "Ana",
+                "apellidos": "Lopez",
+                "email": "ana@test.com",
+                "comision": "A1",
+                "regional": "Centro",
+            },
+        ],
+    )
+    service = ComunicacionService(db_session, tenant.id)
+    lote = await service.enqueue(
+        materia_id=materia.id,
+        entrada_padron_ids=[entries[0].id],
+        asunto_template="Hola {alumno_nombre}",
+        cuerpo_template="Seguimiento",
+        actor=actor,
+        audit_actor_id=actor.id,
+    )
+    await db_session.flush()
+
+    processed_before = await process_pending_communications(db_session)
+    assert processed_before == 0
+
+    await service.approve_lote(lote["lote_id"], actor.id, actor)
+    processed_after = await process_pending_communications(db_session)
+    await db_session.commit()
+
+    assert processed_after == 1
+    comunicacion = await db_session.get(Comunicacion, lote["comunicaciones"][0]["id"])
+    assert comunicacion is not None
+    assert comunicacion.estado == EstadoComunicacion.ENVIADO
+
+
+@pytest.mark.asyncio
+async def test_worker_marks_error_when_dispatch_fails(db_session: AsyncSession) -> None:
+    tenant = await create_test_tenant(db_session, slug="c12-worker-err")
+    materia = await create_test_materia(
+        db_session, tenant_id=tenant.id, codigo="C12-WRE"
+    )
+    cohorte = await create_test_cohorte(
+        db_session, tenant_id=tenant.id, nombre="C12-WRE"
+    )
+    actor = await _create_coordinador_actor(
+        db_session, tenant_id=tenant.id, email="coord-worker-err@test.com"
+    )
+    entries = await _create_padron_entries(
+        db_session,
+        tenant_id=tenant.id,
+        materia_id=materia.id,
+        cohorte_id=cohorte.id,
+        rows=[
+            {
+                "nombre": "Ana",
+                "apellidos": "Lopez",
+                "email": "ana@test.com",
+                "comision": "A1",
+                "regional": "Centro",
+            },
+        ],
+    )
+    service = ComunicacionService(db_session, tenant.id)
+    lote = await service.enqueue(
+        materia_id=materia.id,
+        entrada_padron_ids=[entries[0].id],
+        asunto_template="Hola {alumno_nombre}",
+        cuerpo_template="Seguimiento",
+        actor=actor,
+        audit_actor_id=actor.id,
+    )
+    processed = await process_pending_communications(
+        db_session,
+        dispatcher=FailingDispatcher(),
+    )
+    await db_session.commit()
+
+    assert processed == 1
+    comunicacion = await db_session.get(Comunicacion, lote["comunicaciones"][0]["id"])
+    assert comunicacion is not None
+    assert comunicacion.estado == EstadoComunicacion.ERROR
+    assert comunicacion.error_detalle is not None
+
+
+@pytest.mark.asyncio
+async def test_other_tenant_cannot_read_foreign_lote(db_session: AsyncSession) -> None:
+    tenant_a = await create_test_tenant(db_session, slug="c12-tenant-a")
+    tenant_b = await create_test_tenant(db_session, slug="c12-tenant-b")
+    materia = await create_test_materia(
+        db_session, tenant_id=tenant_a.id, codigo="C12-TA"
+    )
+    cohorte = await create_test_cohorte(
+        db_session, tenant_id=tenant_a.id, nombre="C12-TA"
+    )
+    actor_a = await _create_coordinador_actor(
+        db_session, tenant_id=tenant_a.id, email="coord-a@test.com"
+    )
+    actor_b = await _create_coordinador_actor(
+        db_session, tenant_id=tenant_b.id, email="coord-b@test.com"
+    )
+    entries = await _create_padron_entries(
+        db_session,
+        tenant_id=tenant_a.id,
+        materia_id=materia.id,
+        cohorte_id=cohorte.id,
+        rows=[
+            {
+                "nombre": "Ana",
+                "apellidos": "Lopez",
+                "email": "ana@test.com",
+                "comision": "A1",
+                "regional": "Centro",
+            },
+        ],
+    )
+    service_a = ComunicacionService(db_session, tenant_a.id)
+    service_b = ComunicacionService(db_session, tenant_b.id)
+    lote = await service_a.enqueue(
+        materia_id=materia.id,
+        entrada_padron_ids=[entries[0].id],
+        asunto_template="Hola {alumno_nombre}",
+        cuerpo_template="Seguimiento",
+        actor=actor_a,
+        audit_actor_id=actor_a.id,
+    )
+
+    with pytest.raises(ComunicacionNotFoundError):
+        await service_b.get_lote(lote["lote_id"], actor=actor_b)
+
+
+@pytest.mark.asyncio
+async def test_api_endpoints_preview_and_lote_lifecycle(
+    client, db_session: AsyncSession
+) -> None:
+    tenant = await create_test_tenant(db_session, slug="c12-api")
+    tenant.communication_approval_required = True
+    materia = await create_test_materia(
+        db_session, tenant_id=tenant.id, codigo="C12-API"
+    )
+    cohorte = await create_test_cohorte(
+        db_session, tenant_id=tenant.id, nombre="C12-API"
+    )
+    await _create_coordinador_actor(
+        db_session, tenant_id=tenant.id, email="coord-api@test.com"
+    )
+    entries = await _create_padron_entries(
+        db_session,
+        tenant_id=tenant.id,
+        materia_id=materia.id,
+        cohorte_id=cohorte.id,
+        rows=[
+            {
+                "nombre": "Ana",
+                "apellidos": "Lopez",
+                "email": "ana@test.com",
+                "comision": "A1",
+                "regional": "Centro",
+            },
+            {
+                "nombre": "Beto",
+                "apellidos": "Ruiz",
+                "email": "beto@test.com",
+                "comision": "A1",
+                "regional": "Centro",
+            },
+        ],
+    )
+    await db_session.commit()
+
+    headers = _login_headers(client, email="coord-api@test.com")
+    payload = {
+        "materia_id": str(materia.id),
+        "entrada_padron_ids": [str(entry.id) for entry in entries],
+        "asunto_template": "Hola {alumno_nombre}",
+        "cuerpo_template": "Seguimiento {materia_nombre}",
+    }
+
+    preview_response = client.post(
         "/api/v1/comunicaciones/preview",
-        json={"asunto": "Test", "cuerpo": "Test", "variables": {}},
+        json=payload,
+        headers=headers,
     )
-    assert resp.status_code == 401
+    assert preview_response.status_code == 200
+    assert preview_response.json()["requiere_aprobacion"] is True
+    assert len(preview_response.json()["preview"]) == 2
 
-
-def test_enviar_sin_auth_retorna_401(client):
-    resp = client.post(
-        "/api/v1/comunicaciones/enviar",
-        json={
-            "asunto": "Test",
-            "cuerpo": "Test",
-            "destinatarios": [],
-            "materia_id": str(uuid4()),
-            "preview_token": "tok",
-        },
+    enqueue_response = client.post(
+        "/api/v1/comunicaciones/lotes",
+        json=payload,
+        headers=headers,
     )
-    assert resp.status_code == 401
+    assert enqueue_response.status_code == 201
+    lote_id = enqueue_response.json()["lote_id"]
 
+    get_response = client.get(
+        f"/api/v1/comunicaciones/lotes/{lote_id}",
+        headers=headers,
+    )
+    assert get_response.status_code == 200
+    assert get_response.json()["total"] == 2
 
-# ===========================================================================
-# Group 7 — Security tests (requires TEST_DATABASE_URL)
-# ===========================================================================
+    approve_response = client.post(
+        f"/api/v1/comunicaciones/lotes/{lote_id}/aprobar",
+        headers=headers,
+    )
+    assert approve_response.status_code == 200
+    assert approve_response.json()["affected"] == 2
 
 
 @pytest.mark.asyncio
-class TestComunicacionSecurity:
-    """Security: PII encryption, log redaction, identity from JWT."""
+async def test_api_preview_rejects_user_without_permission(
+    client, db_session: AsyncSession
+) -> None:
+    tenant = await create_test_tenant(db_session, slug="c12-api-no-perm")
+    materia = await create_test_materia(
+        db_session, tenant_id=tenant.id, codigo="C12-NOPERM"
+    )
+    cohorte = await create_test_cohorte(
+        db_session, tenant_id=tenant.id, nombre="C12-NOPERM"
+    )
+    await _create_user_without_permissions(
+        db_session,
+        tenant_id=tenant.id,
+        email="sinperm-api@test.com",
+    )
+    entries = await _create_padron_entries(
+        db_session,
+        tenant_id=tenant.id,
+        materia_id=materia.id,
+        cohorte_id=cohorte.id,
+        rows=[
+            {
+                "nombre": "Ana",
+                "apellidos": "Lopez",
+                "email": "ana@test.com",
+                "comision": "A1",
+                "regional": "Centro",
+            },
+        ],
+    )
+    await db_session.commit()
 
-    async def test_destinatario_cifrado_en_db(
-        self, db_session, test_tenant, test_materia
-    ):
-        """Raw DB value for destinatario must not equal plain email."""
-        from sqlalchemy import text
-
-        from app.models.usuario import Usuario
-        from app.repositories.comunicacion_repository import ComunicacionRepository
-
-        usuario = Usuario(
-            tenant_id=test_tenant.id,
-            nombre="Sec",
-            apellidos="Tester",
-            email="sec7@test.com",
-        )
-        db_session.add(usuario)
-        await db_session.flush()
-
-        repo = ComunicacionRepository(db_session, test_tenant.id)
-        await repo.crear(
-            tenant_id=test_tenant.id,
-            enviado_por=usuario.id,
-            materia_id=test_materia.id,
-            destinatario="secret-pii@alumno.com",
-            asunto="Security test",
-            cuerpo="Body",
-        )
-        await db_session.flush()
-
-        raw = (
-            await db_session.execute(
-                text(
-                    "SELECT destinatario FROM comunicacion WHERE asunto = 'Security test' LIMIT 1"
-                )
-            )
-        ).fetchone()
-        assert raw[0] != "secret-pii@alumno.com"
-
-    async def test_pii_ausente_en_logs(
-        self, db_session, test_tenant, test_materia, caplog
-    ):
-        """Email destinatario must not appear in any log output."""
-        import logging
-
-        from app.models.usuario import Usuario
-        from app.repositories.comunicacion_repository import ComunicacionRepository
-
-        usuario = Usuario(
-            tenant_id=test_tenant.id,
-            nombre="Log",
-            apellidos="Tester",
-            email="logtest7@test.com",
-        )
-        db_session.add(usuario)
-        await db_session.flush()
-
-        repo = ComunicacionRepository(db_session, test_tenant.id)
-        with caplog.at_level(logging.DEBUG):
-            await repo.crear(
-                tenant_id=test_tenant.id,
-                enviado_por=usuario.id,
-                materia_id=test_materia.id,
-                destinatario="do-not-log@secret.com",
-                asunto="Log security test",
-                cuerpo="Body",
-            )
-            await db_session.flush()
-
-        assert "do-not-log@secret.com" not in caplog.text
+    headers = _login_headers(client, email="sinperm-api@test.com")
+    response = client.post(
+        "/api/v1/comunicaciones/preview",
+        json={
+            "materia_id": str(materia.id),
+            "entrada_padron_ids": [str(entries[0].id)],
+            "asunto_template": "Hola {alumno_nombre}",
+            "cuerpo_template": "Seguimiento",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 403
