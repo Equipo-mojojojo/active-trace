@@ -11,7 +11,7 @@ async def test_password_recovery_uses_single_use_reset_token(client, db_session)
     await create_test_user(db_session, tenant_id=tenant.id, email="recover@example.com")
 
     forgot_response = client.post(
-        "/api/auth/forgot",
+        "/api/v1/auth/forgot",
         json={"email": "recover@example.com"},
     )
 
@@ -24,25 +24,25 @@ async def test_password_recovery_uses_single_use_reset_token(client, db_session)
     ).scalar_one()
 
     reset_response = client.post(
-        "/api/auth/reset",
+        "/api/v1/auth/reset",
         json={"token": stored_token.token_value, "new_password": "NewPassword123!"},
     )
 
     assert reset_response.status_code == 200
 
     reused_response = client.post(
-        "/api/auth/reset",
+        "/api/v1/auth/reset",
         json={"token": stored_token.token_value, "new_password": "AnotherPassword123!"},
     )
 
     assert reused_response.status_code == 400
 
     old_login = client.post(
-        "/api/auth/login",
+        "/api/v1/auth/login",
         json={"email": "recover@example.com", "password": "Password123!"},
     )
     new_login = client.post(
-        "/api/auth/login",
+        "/api/v1/auth/login",
         json={"email": "recover@example.com", "password": "NewPassword123!"},
     )
 

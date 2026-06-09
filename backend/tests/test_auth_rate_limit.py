@@ -9,17 +9,17 @@ async def test_login_rate_limit_and_anonymous_access_restriction(client, db_sess
 
     for _ in range(5):
         response = client.post(
-            "/api/auth/login",
+            "/api/v1/auth/login",
             json={"email": "limit@example.com", "password": "wrong-password"},
         )
         assert response.status_code == 401
 
     limited_response = client.post(
-        "/api/auth/login",
+        "/api/v1/auth/login",
         json={"email": "limit@example.com", "password": "wrong-password"},
     )
 
     assert limited_response.status_code == 429
 
-    anonymous_me_response = client.get("/api/auth/me")
+    anonymous_me_response = client.get("/api/v1/auth/me")
     assert anonymous_me_response.status_code == 401

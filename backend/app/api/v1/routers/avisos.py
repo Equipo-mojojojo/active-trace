@@ -66,6 +66,15 @@ async def create_aviso(
     return aviso  # type: ignore[return-value]
 
 
+@router.get("/mis-avisos", response_model=list[AvisoResponse])
+async def mis_avisos(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[AvisoResponse]:
+    service = _aviso_service(user, db)
+    return await service.mis_avisos(user)  # type: ignore[return-value]
+
+
 @router.get("/{aviso_id}", response_model=AvisoDetailResponse)
 async def get_aviso(
     aviso_id: UUID,
@@ -100,15 +109,6 @@ async def update_aviso(
     )
 
     return aviso  # type: ignore[return-value]
-
-
-@router.get("/mis-avisos", response_model=list[AvisoResponse])
-async def mis_avisos(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> list[AvisoResponse]:
-    service = _aviso_service(user, db)
-    return await service.mis_avisos(user)  # type: ignore[return-value]
 
 
 @router.post("/{aviso_id}/ack", response_model=AcknowledgmentResponse)

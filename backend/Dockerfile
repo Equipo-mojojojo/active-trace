@@ -14,6 +14,7 @@ COPY backend/pyproject.toml ./pyproject.toml
 COPY backend/app ./app
 COPY backend/alembic ./alembic
 COPY backend/alembic.ini ./alembic.ini
+COPY backend/scripts ./scripts
 
 RUN pip install --upgrade pip && pip install .
 
@@ -30,6 +31,7 @@ COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app/app ./app
 COPY --from=builder /app/alembic ./alembic
 COPY --from=builder /app/alembic.ini ./alembic.ini
+COPY --from=builder /app/scripts ./scripts
 
 EXPOSE 8000
 

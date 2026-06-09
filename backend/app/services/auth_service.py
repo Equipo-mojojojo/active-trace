@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from app.core.security import (
     build_email_lookup,
@@ -31,6 +31,12 @@ class AuthenticationResult:
     expires_in: int | None
     requires_two_factor: bool = False
     challenge_token: str | None = None
+    # User context — populated on successful auth, None when 2FA pending
+    user_id: str | None = None
+    user_full_name: str | None = None
+    user_email: str | None = None
+    user_tenant_id: str | None = None
+    user_roles: list = field(default_factory=list)
 
 
 class AuthService:
@@ -276,4 +282,9 @@ class AuthService:
             access_token=access_token,
             refresh_token=refresh_token,
             expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            user_id=str(user.id),
+            user_full_name=user.full_name,
+            user_email=user.email,
+            user_tenant_id=str(user.tenant_id),
+            user_roles=list(user.roles),
         )

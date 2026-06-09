@@ -10,6 +10,21 @@ class LoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class AuthUserResponse(BaseModel):
+    id: str
+    nombre: str
+    email: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class AuthTenantResponse(BaseModel):
+    id: str
+    nombre: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class RefreshRequest(BaseModel):
     refresh_token: str
 
@@ -62,6 +77,34 @@ class TokenResponse(BaseModel):
     expires_in: int | None = None
     requires_two_factor: bool = False
     challenge_token: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class AuthResponse(BaseModel):
+    """Enriched auth response returned to the frontend after login/refresh.
+
+    Includes all TokenResponse fields for test backward-compat, plus
+    the user/tenant/permissions context the frontend needs.
+    """
+
+    # Core token fields (kept for backward compat)
+    access_token: str | None = None
+    refresh_token: str | None = None
+    token_type: str = "bearer"
+    expires_in: int | None = None
+
+    # 2FA fields — both naming conventions so tests and frontend both work
+    requires_two_factor: bool = False
+    requires_2fa: bool = False
+    challenge_token: str | None = None
+    session_token: str | None = None
+
+    # Enriched context (populated on successful auth, null on 2FA pending)
+    user: AuthUserResponse | None = None
+    permissions: list[str] = []
+    roles: list[str] = []
+    tenant: AuthTenantResponse | None = None
 
     model_config = ConfigDict(extra="forbid")
 

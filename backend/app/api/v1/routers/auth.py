@@ -1,12 +1,21 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from uuid import UUID
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.dependencies import get_current_user, get_db
+from app.core.permissions import get_effective_permissions
+from app.models.tenant import Tenant
 from app.repositories.auth_repository import AuthRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.auth import (
+    AuthResponse,
+    AuthTenantResponse,
+    AuthUserResponse,
     CurrentUserResponse,
     ForgotPasswordRequest,
     LoginRequest,
@@ -21,7 +30,7 @@ from app.schemas.auth import (
 )
 from app.services.auth_service import AuthError, AuthService, RateLimitExceededError
 
-router = APIRouter(prefix="/api/auth", tags=["auth"])
+router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 
 def build_auth_service(db: AsyncSession) -> AuthService:
@@ -32,12 +41,76 @@ def get_client_ip(request: Request) -> str:
     return request.client.host if request.client is not None else "unknown"
 
 
-@router.post("/login", response_model=TokenResponse)
+async def _build_auth_response(
+    result,
+    db: AsyncSession,
+    response: Response | None = None,
+) -> AuthResponse:
+    """Build enriched AuthResponse from AuthenticationResult and optionally set cookie."""
+    settings = get_settings()
+
+    # When 2FA challenge is required, return minimal response
+    if result.requires_two_factor:
+        return AuthResponse(
+            requires_two_factor=True,
+            requires_2fa=True,
+            challenge_token=result.challenge_token,
+            session_token=result.challenge_token,
+            access_token=None,
+        )
+
+    # Fetch tenant for name
+    tenant_row = await db.execute(
+        select(Tenant).where(Tenant.id == UUID(result.user_tenant_id))
+    )
+    tenant = tenant_row.scalar_one_or_none()
+
+    # Resolve permissions
+    perms = await get_effective_permissions(
+        user_id=result.user_id,
+        tenant_id=result.user_tenant_id,
+        db=db,
+    )
+
+    # Set httpOnly refresh-token cookie when a Response object is provided
+    if response is not None and result.refresh_token:
+        response.set_cookie(
+            key="refresh_token",
+            value=result.refresh_token,
+            httponly=True,
+            samesite="lax",
+            max_age=settings.REFRESH_TOKEN_EXPIRE_MINUTES * 60,
+            path="/api/v1/auth",
+        )
+
+    return AuthResponse(
+        access_token=result.access_token,
+        refresh_token=result.refresh_token,
+        token_type="bearer",
+        expires_in=result.expires_in,
+        requires_two_factor=False,
+        requires_2fa=False,
+        user=AuthUserResponse(
+            id=result.user_id,
+            nombre=result.user_full_name,
+            email=result.user_email,
+        ),
+        permissions=sorted(perms),
+        roles=result.user_roles,
+        tenant=AuthTenantResponse(
+            id=result.user_tenant_id,
+            nombre=tenant.name if tenant else "Unknown",
+        ),
+    )
+
+
+@router.post("/login", response_model=AuthResponse)
 async def login(
     payload: LoginRequest,
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
-) -> TokenResponse:
+) -> AuthResponse:
     auth_service = build_auth_service(db)
 
     try:
@@ -56,53 +129,65 @@ async def login(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)
         ) from exc
 
-    return TokenResponse(
-        access_token=result.access_token,
-        refresh_token=result.refresh_token,
-        expires_in=result.expires_in,
-        requires_two_factor=result.requires_two_factor,
-        challenge_token=result.challenge_token,
-    )
+    return await _build_auth_response(result, db, response)
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post("/refresh", response_model=AuthResponse)
 async def refresh_token(
-    payload: RefreshRequest,
+    request: Request,
+    response: Response,
+    payload: RefreshRequest | None = Body(default=None),
     db: AsyncSession = Depends(get_db),
-) -> TokenResponse:
+) -> AuthResponse:
     auth_service = build_auth_service(db)
 
+    # Body takes priority so existing tests keep working; cookie is the frontend path
+    token = (payload.refresh_token if payload else None) or request.cookies.get(
+        "refresh_token"
+    )
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No refresh token provided",
+        )
+
     try:
-        result = await auth_service.refresh(refresh_token=payload.refresh_token)
+        result = await auth_service.refresh(refresh_token=token)
     except AuthError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)
         ) from exc
 
-    return TokenResponse(
-        access_token=result.access_token,
-        refresh_token=result.refresh_token,
-        expires_in=result.expires_in,
-    )
+    return await _build_auth_response(result, db, response)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
-    payload: LogoutRequest,
+    request: Request,
+    response: Response,
+    payload: LogoutRequest | None = Body(default=None),
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     auth_service = build_auth_service(db)
 
-    try:
-        await auth_service.logout(
-            current_user=current_user, refresh_token=payload.refresh_token
+    token = (payload.refresh_token if payload else None) or request.cookies.get(
+        "refresh_token"
+    )
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No refresh token provided",
         )
+
+    try:
+        await auth_service.logout(current_user=current_user, refresh_token=token)
     except AuthError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)
         ) from exc
 
+    response.delete_cookie(key="refresh_token", path="/api/v1/auth")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -169,12 +254,13 @@ async def enable_two_factor(
     return MessageResponse(message="Two-factor authentication enabled")
 
 
-@router.post("/2fa/verify", response_model=TokenResponse)
+@router.post("/2fa/verify", response_model=AuthResponse)
 async def verify_two_factor(
     payload: TwoFactorVerifyRequest,
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
-) -> TokenResponse:
+) -> AuthResponse:
     auth_service = build_auth_service(db)
 
     try:
@@ -189,11 +275,7 @@ async def verify_two_factor(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)
         ) from exc
 
-    return TokenResponse(
-        access_token=result.access_token,
-        refresh_token=result.refresh_token,
-        expires_in=result.expires_in,
-    )
+    return await _build_auth_response(result, db, response)
 
 
 @router.get("/me", response_model=CurrentUserResponse)

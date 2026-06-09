@@ -14,7 +14,7 @@ async def test_login_success_and_identity_comes_only_from_token(client, db_sessi
     )
 
     response = client.post(
-        "/api/auth/login",
+        "/api/v1/auth/login",
         json={"email": "admin@example.com", "password": "Password123!"},
     )
 
@@ -31,7 +31,7 @@ async def test_login_success_and_identity_comes_only_from_token(client, db_sessi
     assert "permissions" not in payload
 
     me_response = client.get(
-        "/api/auth/me?user_id=spoofed&tenant_id=spoofed",
+        "/api/v1/auth/me?user_id=spoofed&tenant_id=spoofed",
         headers={"Authorization": f"Bearer {data['access_token']}"},
     )
 
@@ -53,7 +53,7 @@ async def test_login_rejects_invalid_credentials(client, db_session):
     )
 
     response = client.post(
-        "/api/auth/login",
+        "/api/v1/auth/login",
         json={"email": "teacher@example.com", "password": "wrong-password"},
     )
 

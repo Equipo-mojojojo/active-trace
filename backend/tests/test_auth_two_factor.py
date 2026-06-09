@@ -10,13 +10,13 @@ async def test_two_factor_enrollment_and_login_challenge_flow(client, db_session
     await create_test_user(db_session, tenant_id=tenant.id, email="2fa@example.com")
 
     login_response = client.post(
-        "/api/auth/login",
+        "/api/v1/auth/login",
         json={"email": "2fa@example.com", "password": "Password123!"},
     )
     login_payload = login_response.json()
 
     enroll_response = client.post(
-        "/api/auth/2fa/enroll",
+        "/api/v1/auth/2fa/enroll",
         headers={"Authorization": f"Bearer {login_payload['access_token']}"},
     )
 
@@ -25,7 +25,7 @@ async def test_two_factor_enrollment_and_login_challenge_flow(client, db_session
     totp = pyotp.TOTP(enroll_payload["secret"])
 
     enable_response = client.post(
-        "/api/auth/2fa/enable",
+        "/api/v1/auth/2fa/enable",
         json={"code": totp.now()},
         headers={"Authorization": f"Bearer {login_payload['access_token']}"},
     )
@@ -33,7 +33,7 @@ async def test_two_factor_enrollment_and_login_challenge_flow(client, db_session
     assert enable_response.status_code == 200
 
     second_login = client.post(
-        "/api/auth/login",
+        "/api/v1/auth/login",
         json={"email": "2fa@example.com", "password": "Password123!"},
     )
 
@@ -44,7 +44,7 @@ async def test_two_factor_enrollment_and_login_challenge_flow(client, db_session
     assert challenge_payload["access_token"] is None
 
     invalid_verify = client.post(
-        "/api/auth/2fa/verify",
+        "/api/v1/auth/2fa/verify",
         json={
             "challenge_token": challenge_payload["challenge_token"],
             "code": "000000",
@@ -54,7 +54,7 @@ async def test_two_factor_enrollment_and_login_challenge_flow(client, db_session
     assert invalid_verify.status_code == 401
 
     valid_verify = client.post(
-        "/api/auth/2fa/verify",
+        "/api/v1/auth/2fa/verify",
         json={
             "challenge_token": challenge_payload["challenge_token"],
             "code": totp.now(),

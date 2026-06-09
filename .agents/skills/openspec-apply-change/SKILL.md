@@ -15,6 +15,39 @@ Implement tasks from an OpenSpec change.
 
 **Steps**
 
+0. **Cargar skills de dominio y preparar herramientas visuales** ← OBLIGATORIO ANTES DE CODEAR
+
+   **0.1 Identificar el dominio del change** (leer el nombre y el `proposal.md` si existe):
+
+   | Dominio del change | Skills a cargar (leer el SKILL.md antes de escribir código) |
+   |--------------------|--------------------------------------------------------------|
+   | Frontend (C-21 a C-24, cualquier `frontend-*` o `ui-*`) | `typescript-advanced-types`, `tailwind-design-system`, `playwright-best-practices`, `dashboard-crud-page` |
+   | Backend Core (modelos, routers, migraciones, auth) | `fastapi-templates`, `postgresql-table-design`, `python-testing-patterns`, `test-driven-development` |
+   | Backend Aux (seguridad, integraciones, performance) | `api-security-best-practices`, `postgresql-optimization`, `systematic-debugging` |
+   | DevOps (Docker, infra) | `multi-stage-dockerfile` |
+
+   Leer cada SKILL.md relevante desde `.agents/skills/<nombre>/SKILL.md` ANTES de escribir código.
+
+   **0.2 Si el change es de frontend → usar Stitch MCP para generar referencia visual**
+
+   Antes de escribir JSX, generar las pantallas principales del change con Stitch:
+   ```
+   mcp__stitch__generate_screen_from_text (project_id: "17067148584640101066")
+   ```
+   Generar UNA pantalla por vista principal del change (ej: login, dashboard, tabla de atrasados).
+
+   **Reglas de uso de Stitch — INAMOVIBLES:**
+   - Stitch es SOLO referencia visual: layout, colores, tipografía, espaciado, componentes UI.
+   - NUNCA usar el código generado por Stitch directamente — solo inspeccionar visualmente.
+   - NUNCA inferir modelos de datos, nombres de campos, tipos ni estructuras de BD desde Stitch.
+   - NUNCA conectar Stitch a endpoints ni al backend. Stitch no sabe nada del dominio.
+   - Los tipos, schemas y estructuras de datos vienen SIEMPRE de los specs OpenSpec y la KB del proyecto.
+   - El código real se escribe desde cero siguiendo las skills de dominio y las convenciones del proyecto.
+
+   **0.3 Verificar que Stitch esté disponible** (solo frontend):
+   - Si `mcp__stitch__*` no está disponible: continuar sin él y documentar en el resumen que Stitch no fue usado.
+   - Si está disponible: obligatorio usarlo antes de cualquier componente de UI.
+
 1. **Select the change**
 
    If a name is provided, use it. Otherwise:
@@ -139,6 +172,8 @@ What would you like to do?
 ```
 
 **Guardrails**
+- **NUNCA escribir código sin haber leído las skills de dominio del paso 0**
+- **NUNCA escribir JSX/componentes de frontend sin haber generado la referencia visual en Stitch (paso 0.2)**
 - Keep going through tasks until done or blocked
 - Always read context files before starting (from the apply instructions output)
 - If task is ambiguous, pause and ask before implementing

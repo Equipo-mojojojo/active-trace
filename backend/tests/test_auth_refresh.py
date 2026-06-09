@@ -10,13 +10,13 @@ async def test_refresh_rotation_rejects_reuse_and_logout_revokes_session(
     await create_test_user(db_session, tenant_id=tenant.id, email="refresh@example.com")
 
     login_response = client.post(
-        "/api/auth/login",
+        "/api/v1/auth/login",
         json={"email": "refresh@example.com", "password": "Password123!"},
     )
     login_payload = login_response.json()
 
     refresh_response = client.post(
-        "/api/auth/refresh",
+        "/api/v1/auth/refresh",
         json={"refresh_token": login_payload["refresh_token"]},
     )
 
@@ -25,7 +25,7 @@ async def test_refresh_rotation_rejects_reuse_and_logout_revokes_session(
     assert rotated_payload["refresh_token"] != login_payload["refresh_token"]
 
     reused_response = client.post(
-        "/api/auth/refresh",
+        "/api/v1/auth/refresh",
         json={"refresh_token": login_payload["refresh_token"]},
     )
 
@@ -33,7 +33,7 @@ async def test_refresh_rotation_rejects_reuse_and_logout_revokes_session(
     assert reused_response.json()["detail"] == "Refresh token reuse detected"
 
     logout_response = client.post(
-        "/api/auth/logout",
+        "/api/v1/auth/logout",
         json={"refresh_token": rotated_payload["refresh_token"]},
         headers={"Authorization": f"Bearer {rotated_payload['access_token']}"},
     )
@@ -41,7 +41,7 @@ async def test_refresh_rotation_rejects_reuse_and_logout_revokes_session(
     assert logout_response.status_code == 204
 
     revoked_response = client.post(
-        "/api/auth/refresh",
+        "/api/v1/auth/refresh",
         json={"refresh_token": rotated_payload["refresh_token"]},
     )
 
